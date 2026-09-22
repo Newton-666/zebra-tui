@@ -1,0 +1,12 @@
+{
+  "name": "zebra",
+  "version": "0.1.0",
+  "description": "Zebra — multi-agent team cockpit TUI, built on pi-tui",
+  "type": "module",
+  "private": true,
+  "bin": { "zebra": "./zebra" },
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
+    "smoke": "node --experimental-strip-types scripts/smoke.ts"
+  }
+}
