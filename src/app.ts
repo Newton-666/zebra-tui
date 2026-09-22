@@ -42,47 +42,65 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   let paneIds = ensureTeamSession(config, true);
   const poller = new ScreenPoller(() => paneIds, config.members, config.id);
 
-  // --- header: KRYSTAL logo + team meta
-  const GLYPHS: Record<string, string[]> = {
-    K: ["██  ██", "██ ██ ", "████  ", "██ ██ ", "██  ██"],
-    R: ["██████", "██  ██", "██████", "██ ██ ", "██  ██"],
-    Y: ["██   ██", " ██ ██ ", "  ███  ", "   ██  ", "   ██  "],
-    S: ["██████", "██    ", "██████", "    ██", "██████"],
-    T: ["██████", "  ██  ", "  ██  ", "  ██  ", "  ██  "],
-    A: [" ████ ", "██  ██", "██████", "██  ██", "██  ██"],
-    L: ["██    ", "██    ", "██    ", "██    ", "██████"],
+  // --- header: KRYSTAL logo（ANSI Shadow 字体，与 hermes banner 同款）+ 全宽圆角框
+  const SHADOW: Record<string, string[]> = {
+    K: ["██╗  ██╗ ", "██║ ██╔╝ ", "█████╔╝  ", "██╔═██╗  ", "██║  ██╗ ", "╚═╝  ╚═╝ "],
+    R: ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"],
+    Y: ["██╗   ██╗", "╚██╗ ██╔╝", " ╚████╔╝ ", "  ╚██╔╝  ", "   ██║   ", "   ╚═╝   "],
+    S: ["███████╗", "██╔════╝", "███████╗", "╚════██║", "███████║", "╚══════╝"],
+    T: ["████████╗", "╚══██╔══╝", "   ██║   ", "   ██║   ", "   ██║   ", "   ╚═╝   "],
+    A: [" █████╗ ", "██╔══██╗", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
+    L: ["██╗     ", "██║     ", "██║     ", "██║     ", "███████╗", "╚══════╝"],
   };
-  const logoRows = Array.from({ length: 5 }, (_v, r) =>
+  const KRYSTAL_GRADIENT = ["38;5;51", "38;5;45", "38;5;39", "38;5;33", "38;5;27", "38;5;26"];
+  const logoRows = Array.from({ length: 6 }, (_v, r) =>
     "KRYSTAL"
       .split("")
-      .map((ch) => GLYPHS[ch]![r]!)
+      .map((ch) => SHADOW[ch]![r]!)
       .join(" "),
   );
-
-  const logoW = Math.max(...logoRows.map((r) => r.length));
+  const LOGO_W = Math.max(...logoRows.map((r) => r.length));
 
   class HeaderBar implements Component {
     invalidate(): void {}
     render(width: number): string[] {
       const inner = Math.max(10, width - 2);
+      const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+      const side = width >= LOGO_W + 52; // 宽屏：元信息放右侧；窄屏：折到 logo 下方
       const info = [
         "",
         ` ${bold("Krystal")} ${dim("·")} ${bold(config.name)} ${dim(`· ${config.members.length} members`)}`,
         dim(` cwd: ${config.cwd}`),
         dim(" 输入广播全员 · 行首 @ 弹窗选人 · :to 锁定 · 拖拽分隔线调宽 · :quit 退出"),
         "",
+        "",
       ];
-      const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
-      const top = dim("╭" + "─".repeat(Math.max(0, width - 2)) + "╮");
-      const bottom = dim("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
       const rows: string[] = [];
       for (let r = 0; r < logoRows.length; r++) {
-        const logo = pad(fg("36", logoRows[r]!), logoW);
-        const right = info[r] ?? "";
-        const content = ` ${logo}  ${right}`;
+        const logo = pad(fg(KRYSTAL_GRADIENT[r]!, logoRows[r]!), LOGO_W);
+        const content = side ? ` ${logo}  ${info[r] ?? ""}` : ` ${logo}`;
         rows.push(dim("│") + pad(truncateToWidth(content, inner, "…"), inner) + dim("│"));
       }
-      return [top, ...rows, bottom];
+      if (!side) {
+        rows.push(
+          dim("│") +
+            pad(
+              truncateToWidth(
+                `  ${bold("Krystal")} ${dim("·")} ${config.name} ${dim(`· ${config.members.length} members · ${config.cwd}`)}`,
+                inner,
+                "…",
+              ),
+              inner,
+            ) +
+            dim("│"),
+        );
+        rows.push(
+          dim("│") +
+            pad(truncateToWidth(dim("  输入广播全员 · 行首 @ 弹窗选人 · :to 锁定 · 拖拽分隔线调宽 · :quit 退出"), inner, "…"), inner) +
+            dim("│"),
+        );
+      }
+      return [dim("╭" + "─".repeat(Math.max(0, width - 2)) + "╮"), ...rows, dim("╰" + "─".repeat(Math.max(0, width - 2)) + "╯")];
     }
   }
   const header = new HeaderBar();
