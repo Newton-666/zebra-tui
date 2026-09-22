@@ -1,6 +1,7 @@
 // zebra smoke test — engine + storage, no TUI
 import { createTeamSession, sendText, captureScreen, killSession, sessionAlive } from "../src/agents.ts";
-import { createSession, appendEvent, readEvents, lastScreens } from "../src/team.ts";
+import fs from "node:fs";
+import { createSession, appendEvent, readEvents, lastScreens, sessionDir } from "../src/team.ts";
 import type { TeamConfig } from "../src/types.ts";
 
 const id = `smoke_${Date.now()}`;
@@ -44,4 +45,8 @@ if (!scrB.join("\n").includes("hello beta")) fail("beta did not receive text");
 killSession(config.tmuxSession);
 if (sessionAlive(config.tmuxSession)) fail("kill failed");
 
+// 清理 smoke 会话目录（避免污染 zebra -c 的「最近会话」）
+try {
+  fs.rmSync(sessionDir(id), { recursive: true, force: true });
+} catch {}
 console.log("SMOKE OK — storage ✓ engine ✓ dispatch ✓ capture ✓");

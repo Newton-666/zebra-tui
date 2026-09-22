@@ -193,6 +193,17 @@ switch (cmd) {
 }
 `;
 
+/** 短身份（每次进群注入，一两句话，省 token） */
+export function identityText(config: TeamConfig, memberId: string): string {
+  const me = config.members.find((m) => m.id === memberId)!;
+  const others = config.members.filter((m) => m.id !== memberId).map((m) => m.name);
+  const who = `[身份] 你是团队「${config.name}」的成员「${me.name}」`;
+  const job = me.role ? `。你的职责：${me.role}` : "";
+  const mate = others.length ? `。队友：${others.join("、")}` : "";
+  const tools = `。协作：krystal roster / krystal send <队友> <消息> / krystal board`;
+  return who + job + mate + tools;
+}
+
 export function briefText(config: TeamConfig, memberId: string): string {
   const me = config.members.find((m) => m.id === memberId)!;
   const others = config.members.filter((m) => m.id !== memberId).map((m) => `${m.name}(${m.type})`);

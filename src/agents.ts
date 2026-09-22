@@ -52,14 +52,16 @@ export function sessionAlive(name: string): boolean {
 }
 
 /** Create the tmux session with one pane per member. Returns pane ids in member order. */
-export function createTeamSession(config: TeamConfig): string[] {
+export function createTeamSession(config: TeamConfig, commands?: string[]): string[] {
   const name = config.tmuxSession;
   if (sessionAlive(name)) killSession(name);
-  ensureKit(config); // 生成 bin/zebra + BRIEF.md
+  ensureKit(config); // 生成 bin/krystal + BRIEF.md
 
+  /** 本次启动命令：可用 commands 覆盖（resume 时避免改动 config.members 的原始命令） */
+  const cmdOf = (i: number) => commands?.[i] ?? config.members[i]!.command;
   const first = config.members[0];
   // -x/-y: detached 会话默认 80x24，split 后每格过小，部分 TUI 会直接退出
-  tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", ...envArgs(config, first), "-c", config.cwd, first.command]);
+  tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", ...envArgs(config, first), "-c", config.cwd, cmdOf(0)]);
 
   // 排列与 zebra 网格对齐：i=1 横切分两列；i>=2 竖切到同列队友(i-2)下方
   // 每个 pane 创建后立刻 remain-on-exit，命令秒退也不会破坏链路
@@ -82,7 +84,7 @@ export function createTeamSession(config: TeamConfig): string[] {
       "-P",
       "-F",
       "#{pane_id}",
-      config.members[i].command,
+      cmdOf(i),
     ]);
     const id = out.trim();
     if (!id) throw new Error(`split-window 未返回 pane id (成员 ${config.members[i].name})`);
@@ -138,11 +140,9 @@ export function ensureTeamSession(config: TeamConfig, useResume: boolean): strin
     killSession(name);
   }
   if (useResume) {
-    const resumed: Member[] = config.members.map((m) => ({
-      ...m,
-      command: m.resumeCommand || m.command,
-    }));
-    return createTeamSession({ ...config, members: resumed });
+    // 就地重建：paneIds 写回原 config（调用方要用），config.members 的原始启动命令保持不变
+    const resumeCommands = config.members.map((m) => m.resumeCommand || m.command);
+    return createTeamSession(config, resumeCommands);
   }
   return createTeamSession(config);
 }

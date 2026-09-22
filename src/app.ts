@@ -1,5 +1,4 @@
 // zebra — main app: header / team grid / status / editor
-import fs from "node:fs";
 import path from "node:path";
 import {
   Editor,
@@ -16,7 +15,7 @@ import {
 } from "../deps/pi-tui/dist/index.js";
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
-import { briefText } from "./kit.ts";
+import { briefText, identityText } from "./kit.ts";
 import { ScreenPoller } from "./poll.ts";
 import { AgentCell } from "./view/cell.ts";
 import { TeamGrid } from "./view/grid.ts";
@@ -40,13 +39,23 @@ const EDITOR_THEME: EditorTheme = {
 
 const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
 
-export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, string[]>): Promise<void> {
+export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, string[]>, freshTeam = false): Promise<void> {
   const terminal = new ProcessTerminal();
   const tui: TUI = new TuiAltScreen(terminal, false, undefined, { wheelScrollLines: 3 });
 
   // --- engine
+  const prevPanes = config.paneIds ? Object.values(config.paneIds) : [];
   let paneIds = ensureTeamSession(config, true);
-  const poller = new ScreenPoller(() => paneIds, config.members, config.id, (m, pane) => respawnPane(config, m, pane));
+  // 复用活窗格 = 成员的上下文还在 → 不重复注入身份（省 token）；新建/重建/复活才注入
+  const contextsAlive = prevPanes.length > 0 && config.members.every((m) => {
+    const now = config.paneIds?.[m.id];
+    return now !== undefined && prevPanes.includes(now);
+  });
+  const reviveQueue = new Set<string>();
+  const poller = new ScreenPoller(() => paneIds, config.members, config.id, (m, pane) => {
+    respawnPane(config, m, pane);
+    reviveQueue.add(m.id); // 复活后需要重注入身份（新进程没有上下文）
+  });
 
   // --- header: Krystal logo（共享 ANSI Shadow 模块）+ 全宽圆角框
   const logoRows = LOGO_ROWS;
@@ -214,7 +223,10 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         ? config.members.filter((mm) => mm.name === arg || mm.id === arg)
         : [...config.members];
       let n = 0;
-      for (const m of targets) if (injectBrief(m)) n++;
+      for (const m of targets) {
+        injectIdentity(m);
+        if (injectBrief(m)) n++;
+      }
       lastAction = `已向 ${n} 名成员重发团队简报`;
       saveTeamConfig(config);
       renderStatus();
@@ -282,12 +294,33 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   };
   poller.start();
 
-  // --- 团队简报注入：成员启动就绪后告诉它「你是谁 / 队友是谁 / 怎么通信」
+  // --- 身份注入：每次进群都把「短身份」发给每个成员；完整简报只发一次
   const briefed = new Set<string>(config.briefed ?? []);
+  // 上下文是新的才注入身份：新建团队 / 引擎重建 / 窗格复活；复用活窗格（resume）不重复注入
+  const pendingIdentity = new Set<string>(freshTeam || !contextsAlive ? config.members.map((m) => m.id) : []);
+  /** 短身份：每次开局 / 窗格复活后注入（一两句话，省 token） */
+  const injectIdentity = (m: Member): boolean => {
+    const idx = config.members.indexOf(m);
+    const paneId = paneIds[idx];
+    if (!paneId || !paneAlive(paneId)) {
+      return false;
+    }
+    try {
+      sendText(paneId, identityText(config, m.id));
+    } catch (e) {
+      return false;
+    }
+    pendingIdentity.delete(m.id);
+    appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name} 注入身份` });
+    return true;
+  };
+
   const injectBrief = (m: Member): boolean => {
     const idx = config.members.indexOf(m);
     const paneId = paneIds[idx];
-    if (!paneId || !paneAlive(paneId)) return false;
+    if (!paneId || !paneAlive(paneId)) {
+      return false;
+    }
     try {
       sendText(paneId, briefText(config, m.id));
     } catch {
@@ -297,17 +330,20 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name} 注入团队简报` });
     return true;
   };
-  let briefTicks = 0;
+  // 常驻监听：身份/简报注入 + 复活后重注入（稳态是空转，开销可忽略）
   const briefTimer = setInterval(() => {
-    briefTicks++;
     for (const m of config.members) {
-      if (briefed.has(m.id)) continue;
       const f = poller.feeds.get(m.id)!;
       const ready = f.alive && f.lines.filter((l) => l.trim().length > 0).length >= 3;
-      if (ready) injectBrief(m);
+      if (!ready) continue;
+      if (reviveQueue.has(m.id)) {
+        pendingIdentity.add(m.id);
+        reviveQueue.delete(m.id);
+      }
+      if (pendingIdentity.has(m.id)) injectIdentity(m); // 每次开局 / 复活后注入
+      if (!briefed.has(m.id)) injectBrief(m); // 完整简报只发一次
     }
-    if (briefed.size >= config.members.length || briefTicks > 15) {
-      clearInterval(briefTimer);
+    if (briefed.size !== (config.briefed?.length ?? 0)) {
       config.briefed = [...briefed];
       saveTeamConfig(config);
       renderStatus();

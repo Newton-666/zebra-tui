@@ -162,6 +162,9 @@ class Wizard implements Component, Focusable {
       if (this.step === "genConfirm" && this.spec) {
         out.push(...this.specLines());
         out.push("");
+      } else if (this.step === "confirm") {
+        out.push(...this.manualLines());
+        out.push("");
       }
       out.push(...this.active.render(width));
     }
@@ -372,8 +375,7 @@ class Wizard implements Component, Focusable {
       this.members[i]!.command = DEFAULT_COMMANDS[type]!.command;
       this.members[i]!.resumeCommand = DEFAULT_COMMANDS[type]!.resume;
       this.members[i]!.color = MEMBER_COLORS[type];
-      if (i + 1 < this.size) this.showName(i + 1);
-      else this.showManualConfirm();
+      this.showIdentity(i);
     });
     list.onCancel = () => this.showName(i);
     this.setActive(list, "type", `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 类型`);
@@ -385,11 +387,38 @@ class Wizard implements Component, Focusable {
       this.members[i]!.command = input.getValue().trim() || "bash";
       this.members[i]!.resumeCommand = this.members[i]!.command;
       this.members[i]!.color = MEMBER_COLORS.custom;
-      if (i + 1 < this.size) this.showName(i + 1);
-      else this.showManualConfirm();
+      this.showIdentity(i);
     });
     input.onEscape = () => this.showType(i);
     this.setActive(input, "cmd", `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 启动命令`);
+  }
+
+  /** 逐个成员输入一句话身份/职责（可回车跳过）——持久化到 team.json，每次进群都会注入 */
+  private showIdentity(i: number): void {
+    const input = new Input();
+    input.onSubmit = this.safe(() => {
+      const role = input.getValue().trim();
+      if (role) this.members[i]!.role = role;
+      if (i + 1 < this.size) this.showName(i + 1);
+      else this.showManualConfirm();
+    });
+    input.onEscape = this.safe(() => this.showType(i));
+    this.setActive(
+      input,
+      "identity",
+      `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 一句话身份/职责（回车跳过）`,
+    );
+  }
+
+  /** 手动配置的确认块（含职责） */
+  private manualLines(): string[] {
+    const out: string[] = [];
+    for (const m of this.members) {
+      const c = m.color ?? "36";
+      out.push(`   ${fg(c, (m.name ?? "").padEnd(12))} ${dim((m.type ?? "").padEnd(7))} ${dim(m.command ?? "")}`);
+      if (m.role) out.push(`     ${dim("职责")} ${truncateToWidth(m.role, 96, "…")}`);
+    }
+    return out;
   }
 
   private showManualConfirm(): void {
@@ -426,6 +455,7 @@ class Wizard implements Component, Focusable {
         command: m.command!,
         resumeCommand: m.resumeCommand,
         color: m.color,
+        role: m.role,
       })) as Member[],
     };
   }

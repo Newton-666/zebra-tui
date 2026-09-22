@@ -70,7 +70,7 @@ async function main() {
     const config = loadSession(result.id);
     console.error(`zebra · 恢复团队 ${config.name}（tmux 会话保留中，正在重接…）`);
     const seed = lastScreens(config.id);
-    await runTeamApp(config, seed);
+    await runTeamApp(config, seed, false);
   } else {
     const config = result.config;
     const { createSession } = await import("./team.ts");
@@ -78,7 +78,7 @@ async function main() {
     createSession(config);
     createTeamSession(config);
     console.error(`zebra · 团队已创建: ${config.name} · 会话 ${config.id}`);
-    await runTeamApp(config, new Map());
+    await runTeamApp(config, new Map(), true);
   }
 
   console.log(`\nzebra 已退出。tmux 会话仍在后台运行：`);
