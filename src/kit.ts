@@ -66,6 +66,32 @@ function cmdRoster(c) {
   }
 }
 
+function recentRelays(windowMs) {
+  try {
+    const lines = fs.readFileSync(path.join(HOME, "history.jsonl"), "utf8").trim().split("\\n");
+    const now = Date.now();
+    let total = 0;
+    const pairs = {};
+    for (let i = lines.length - 1; i >= 0 && i > lines.length - 500; i--) {
+      let e;
+      try {
+        e = JSON.parse(lines[i]);
+      } catch {
+        continue;
+      }
+      if (e.type !== "relay") continue;
+      const t = Date.parse(e.t);
+      if (!t || now - t > windowMs) continue;
+      total++;
+      const k = e.from + "→" + e.to;
+      pairs[k] = (pairs[k] || 0) + 1;
+    }
+    return { total, pairs };
+  } catch {
+    return { total: 0, pairs: {} };
+  }
+}
+
 function cmdSend(c, args) {
   const name = args[0];
   const text = args.slice(1).join(" ").trim();
@@ -87,6 +113,22 @@ function cmdSend(c, args) {
   if (!paneAlive(pane)) {
     console.error(\`队友「\${target.name}」的窗格已退出（请让 Krystal 执行 :team 重建）\`);
     process.exit(1);
+  }
+  // 循环保护：短时间内互发过多 → 阻止（疑似「互相确认」死循环）
+  const { total, pairs } = recentRelays(60000);
+  const pairCount = pairs[self.name + "→" + target.name] || 0;
+  if (total >= 6 || pairCount >= 3) {
+    console.error(
+      "krystal: 已阻止发送 —— 60 秒内互助消息过多（疑似确认循环）。\\n" +
+        "  建议：结论写白板（krystal board <内容>），或等人类在 Krystal 里介入；\\n" +
+        "  确有实质新信息时，请稍等 1 分钟再发。",
+    );
+    appendHistory({
+      t: new Date().toISOString(),
+      type: "note",
+      text: \`已阻止 \${self.name} → \${target.name} 的发送（频率保护：60s 内 \${total} 条 / 本对 \${pairCount} 条）\`,
+    });
+    process.exit(3);
   }
   const line = \`[from \${self.name}] \${text}\`;
   tmux(["send-keys", "-t", pane, "-l", "--", line]);
@@ -194,7 +236,11 @@ export function ensureKit(config: TeamConfig): void {
     ``,
     `- 收到 \`[from X]\` 开头的消息 = 队友 X 发来的，回复用 \`krystal send X <消息>\``,
     `- 需要人工介入（改代码、审批、环境问题）时，直接在会话里说明即可，人类在 Krystal 里看着所有成员`,
-    `- 共享状态请写白板，避免互相刷屏`,
+    `- **对齐只做一轮**：确认身份/在线/分工即可，不要互相复述协议、不要逐条确认`,
+    `- **纯确认类消息不必回复**（收到"收到/同意/确认"就停手，避免礼貌循环）`,
+    `- **结论写白板**，不要把长内容在会话间来回搬运`,
+    `- 频率保护：同一对队友 60 秒内互发超过 3 条（或全局 6 条）会被自动阻止`,
+    `- 无实质新信息时保持安静，等人类派工`,
     ``,
     `工作目录：\`${config.cwd}\``,
     `引擎会话：\`${config.tmuxSession}\``,
