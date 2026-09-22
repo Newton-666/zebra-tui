@@ -51,7 +51,7 @@ class CellTop implements Component {
   render(width: number): string[] {
     if (this.cached && this.cached.w === width) return [this.cached.line];
     const m = this.member;
-    const state = !this.alive ? dim("✗ dead") : this.active ? "●" + fg("32", " working") : dim("○ idle");
+    const state = !this.alive ? dim("× dead") : this.active ? "●" + fg("32", " working") : dim("○ idle");
     const head = `${bold(m.name)}${dim(` (${m.type})`)}  ${state}`;
     const suffix = memberFg(m, `${"─".repeat(Math.max(1, width - 5 - visibleWidth(head)))}╮`);
     this.cached = { w: width, line: truncateToWidth(`${memberFg(m, "╭─ ")}${head} ${suffix}`, width) };

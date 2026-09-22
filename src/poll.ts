@@ -64,7 +64,7 @@ export class ScreenPoller {
         if (!paneAlive(paneId)) {
           if (feed.alive) {
             feed.alive = false;
-            feed.lines = [`✗ ${m.name} 退出了，正在自动复活…`];
+            feed.lines = [`× ${m.name} 退出了，正在自动复活…`];
             anyChange = true;
           }
           this.tryRevive(m, paneId);

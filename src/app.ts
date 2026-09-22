@@ -22,6 +22,7 @@ import { AgentCell } from "./view/cell.ts";
 import { TeamGrid } from "./view/grid.ts";
 import { MentionProvider } from "./ui/mention.ts";
 import { BLUE_LIGHT, bold, chip, dim, fg, memberFg } from "./ui/ansi.ts";
+import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "./ui/logo.ts";
 import type { Member, TeamConfig } from "./types.ts";
 
 const SELECT_LIST_THEME = {
@@ -37,6 +38,8 @@ const EDITOR_THEME: EditorTheme = {
   selectList: SELECT_LIST_THEME,
 };
 
+const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+
 export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, string[]>): Promise<void> {
   const terminal = new ProcessTerminal();
   const tui: TUI = new TuiAltScreen(terminal, false, undefined, { wheelScrollLines: 3 });
@@ -45,36 +48,20 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   let paneIds = ensureTeamSession(config, true);
   const poller = new ScreenPoller(() => paneIds, config.members, config.id, (m, pane) => respawnPane(config, m, pane));
 
-  // --- header: KRYSTAL logo（ANSI Shadow 字体，与 hermes banner 同款）+ 全宽圆角框
-  const SHADOW: Record<string, string[]> = {
-    K: ["██╗  ██╗ ", "██║ ██╔╝ ", "█████╔╝  ", "██╔═██╗  ", "██║  ██╗ ", "╚═╝  ╚═╝ "],
-    R: ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"],
-    Y: ["██╗   ██╗", "╚██╗ ██╔╝", " ╚████╔╝ ", "  ╚██╔╝  ", "   ██║   ", "   ╚═╝   "],
-    S: ["███████╗", "██╔════╝", "███████╗", "╚════██║", "███████║", "╚══════╝"],
-    T: ["████████╗", "╚══██╔══╝", "   ██║   ", "   ██║   ", "   ██║   ", "   ╚═╝   "],
-    A: [" █████╗ ", "██╔══██╗", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
-    L: ["██╗     ", "██║     ", "██║     ", "██║     ", "███████╗", "╚══════╝"],
-  };
-  const KRYSTAL_GRADIENT = ["38;5;51", "38;5;45", "38;5;39", "38;5;33", "38;5;27", "38;5;26"];
-  const logoRows = Array.from({ length: 6 }, (_v, r) =>
-    "KRYSTAL"
-      .split("")
-      .map((ch) => SHADOW[ch]![r]!)
-      .join(" "),
-  );
-  const LOGO_W = Math.max(...logoRows.map((r) => r.length));
+  // --- header: Krystal logo（共享 ANSI Shadow 模块）+ 全宽圆角框
+  const logoRows = LOGO_ROWS;
+  const LOGO_W = LOGO_WIDTH;
 
   class HeaderBar implements Component {
     invalidate(): void {}
     render(width: number): string[] {
       const inner = Math.max(10, width - 2);
-      const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
-      const side = width >= LOGO_W + 52; // 宽屏：元信息放右侧；窄屏：折到 logo 下方
+      const side = width >= LOGO_W + 52;
       const info = [
         "",
         ` ${bold("Krystal")} ${dim("·")} ${bold(config.name)} ${dim(`· ${config.members.length} members`)}`,
         dim(` cwd: ${config.cwd}`),
-        dim(" 输入广播全员 · 行首 @ 弹窗选人 · :to 锁定 · 拖拽分隔线调宽 · :quit 退出"),
+        ...(config.goal ? [dim(` 目标: ${config.goal}`)] : [dim(" 输入广播全员 · 行首 @ 弹窗选人 · :brief 重发简报 · :quit 退出")]),
         "",
         "",
       ];
@@ -85,23 +72,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         rows.push(dim("│") + pad(truncateToWidth(content, inner, "…"), inner) + dim("│"));
       }
       if (!side) {
-        rows.push(
-          dim("│") +
-            pad(
-              truncateToWidth(
-                `  ${bold("Krystal")} ${dim("·")} ${config.name} ${dim(`· ${config.members.length} members · ${config.cwd}`)}`,
-                inner,
-                "…",
-              ),
-              inner,
-            ) +
-            dim("│"),
-        );
-        rows.push(
-          dim("│") +
-            pad(truncateToWidth(dim("  输入广播全员 · 行首 @ 弹窗选人 · :to 锁定 · 拖拽分隔线调宽 · :quit 退出"), inner, "…"), inner) +
-            dim("│"),
-        );
+        rows.push(dim("│") + pad(truncateToWidth(`  ${bold("Krystal")} ${dim("·")} ${config.name} ${dim(`· ${config.members.length} members · ${config.cwd}`)}`, inner, "…"), inner) + dim("│"));
       }
       return [dim("╭" + "─".repeat(Math.max(0, width - 2)) + "╮"), ...rows, dim("╰" + "─".repeat(Math.max(0, width - 2)) + "╯")];
     }
@@ -145,7 +116,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     invalidate(): void {}
     render(width: number): string[] {
       // Starship 风格分段：蓝底品牌胶囊 + 成员状态 + 最近动作 + 提示（无整条反色底）
-      const brand = chip(" ⚡ Krystal ");
+      const brand = chip(" Krystal ");
       const team = bold(config.name);
       const sep = " " + dim("·") + " ";
       const hints = dim(":to 锁定 · :quit 退出");
@@ -161,7 +132,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       .map((m) => {
         const f = poller.feeds.get(m.id)!;
         const active = Date.now() - f.changedAt < 4000 && f.alive;
-        const dotCh = !f.alive ? dim("✗") : active ? memberFg(m, "●") : dim("○");
+        const dotCh = !f.alive ? dim("×") : active ? memberFg(m, "●") : dim("○");
         const locked = lockedTo === m.id ? memberFg(m, bold("◈")) : "";
         return `${dotCh} ${m.name}${locked}`;
       })
@@ -351,7 +322,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       const t = fs.readFileSync(path.join(sessionDir(config.id), "last-relay"), "utf8").trim();
       if (t && t !== lastRelayText) {
         lastRelayText = t;
-        lastAction = `⇄ ${truncateToWidth(t, 60, "…")}`;
+        lastAction = truncateToWidth(t, 60, "…");
         renderStatus();
       }
     } catch {

@@ -60,7 +60,7 @@ function cmdRoster(c) {
   console.log(\`团队「\${c.name}」（\${c.members.length} 名成员）\`);
   for (const m of c.members) {
     const pane = c.paneIds && c.paneIds[m.id];
-    const alive = pane ? (paneAlive(pane) ? "● 在线" : "✗ 已退出") : "? 无窗格";
+    const alive = pane ? (paneAlive(pane) ? "● 在线" : "× 已退出") : "? 无窗格";
     const tag = m.id === self.id ? "（你）" : "";
     console.log(\`  \${m.name.padEnd(10)} \${String(m.type).padEnd(8)} \${alive}\${tag}\`);
   }
@@ -138,7 +138,7 @@ function cmdSend(c, args) {
   try {
     fs.writeFileSync(relayPath, \`\${self.name} → \${target.name}: \${text}\`);
   } catch {}
-  console.log(\`✓ 已发送给 \${target.name}: \${text}\`);
+  console.log(\`已发送给 \${target.name}: \${text}\`);
 }
 
 function cmdBoard(_c, args) {
@@ -148,7 +148,7 @@ function cmdBoard(_c, args) {
     const entry = \`- [\${new Date().toISOString().slice(0, 16).replace("T", " ")}] \${m.name}: \${args.join(" ")}\`;
     fs.appendFileSync(boardPath, entry + "\\n");
     appendHistory({ t: new Date().toISOString(), type: "note", text: \`白板追加（\${m.name}）: \${args.join(" ")}\` });
-    console.log("✓ 已追加到团队白板");
+    console.log("已追加到团队白板");
     return;
   }
   if (!fs.existsSync(boardPath)) {
@@ -199,10 +199,13 @@ export function briefText(config: TeamConfig, memberId: string): string {
   const home = sessionDir(config.id);
   // 注意：必须单行——send-keys 的换行会被 TUI 当作回车逐行提交
   return [
-    `[Krystal 团队简报] 你是团队「${config.name}」的成员「${me.name}」，队友：${others.join("、") || "（无）"}。`,
+    `[Krystal 团队简报] 你是团队「${config.name}」的成员「${me.name}」${me.role ? `，职责：${me.role}` : ""}。` +
+      `${config.goal ? `团队目标：${config.goal}。` : ""}队友：${others.join("、") || "（无）"}。`,
     `协作命令（在你的终端里执行）：krystal whoami 确认身份 · krystal roster 看队友与状态 ·`,
     `krystal send <队友> <消息> 给队友发消息（对方会看到，前缀 [from ${me.name}]）· krystal board [内容] 团队白板。`,
-    `若 PATH 里找不到，用绝对路径 ${home}/bin/krystal。收到 [from X] 开头的消息即来自队友 X，回复用 krystal send X <消息>。简报全文：${home}/BRIEF.md`,
+    `若 PATH 里找不到，用绝对路径 ${home}/bin/krystal。收到 [from X] 开头的消息即来自队友 X，回复用 krystal send X <消息>。`,
+    `纪律：对齐只做一轮（确认在线/分工即可），不要互相复述或反复确认协议；纯确认类消息不必回复；`,
+    `结论写白板而不是互发；无实质新信息时保持安静，等人类派工。简报全文：${home}/BRIEF.md`,
   ].join(" ");
 }
 
@@ -214,15 +217,26 @@ export function ensureKit(config: TeamConfig): void {
   const helper = path.join(bin, "krystal");
   fs.writeFileSync(helper, HELPER);
   fs.chmodSync(helper, 0o755);
-  if (!fs.existsSync(path.join(dir, "board.md"))) {
-    fs.writeFileSync(path.join(dir, "board.md"), `# ${config.name} 团队白板\n\n`);
+  const boardPath = path.join(dir, "board.md");
+  if (!fs.existsSync(boardPath)) {
+    const seed: string[] = [`# ${config.name} 团队白板`, ""];
+    if (config.goal) seed.push(`**目标**：${config.goal}`, "");
+    if (config.protocol?.length) {
+      seed.push("**协作协议（预置）**", ...config.protocol.map((p, i) => `${i + 1}. ${p}`), "");
+    }
+    seed.push("---", "", "（成员请在此追加状态与结论：`krystal board <内容>`）", "");
+    fs.writeFileSync(boardPath, seed.join("\n"));
   }
   const lines: string[] = [
     `# ${config.name} — 团队简报`,
     ``,
-    `本团队由 Krystal 编排，共 ${config.members.length} 名成员：`,
-    ...config.members.map((m) => `- **${m.name}**（${m.type}）${m.command ? `— \`${m.command}\`` : ""}`),
+    ...(config.goal ? [`**团队目标**：${config.goal}`, ``] : []),
+    `本团队由 Krystal 编排，共 ${config.members.length} 名成员（含职责）：`,
+    ...config.members.map((m) => `- **${m.name}**（${m.type}）${m.role ? `— ${m.role}` : m.command ? `— \`${m.command}\`` : ""}`),
     ``,
+    ...(config.protocol && config.protocol.length
+      ? ["## 协作协议（已预置，无需再互相谈判）", "", ...config.protocol.map((p, i) => `${i + 1}. ${p}`), ""]
+      : []),
     `## 你与队友的协作方式`,
     ``,
     `在你的终端里执行（Krystal 已把 \`krystal\` 放进你们的 PATH；若被 profile 重置 PATH，用绝对路径 \`${bin}/krystal\`）：`,

@@ -9,6 +9,7 @@ export interface Member {
   command: string;       // interactive launch command (run inside tmux pane)
   resumeCommand?: string; // best-effort resume variant (used when pane died)
   color?: string;        // ansi fg code base, e.g. "36"
+  role?: string;         // 职责描述（写入团队简报，告诉成员它负责什么）
 }
 
 export interface TeamConfig {
@@ -21,6 +22,8 @@ export interface TeamConfig {
   paneIds?: Record<string, string>; // memberId -> tmux pane id (persisted)
   gridRatios?: number[];            // 列宽比例（可拖拽分隔线调整）
   briefed?: string[];               // 已注入团队简报的成员 id
+  goal?: string;                    // 团队目标（一句话建队生成 / 手动填写）
+  protocol?: string[];              // 协作协议（预置到白板，免去成员互相谈判）
 }
 
 export type HistoryEvent =
