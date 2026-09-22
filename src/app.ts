@@ -18,7 +18,7 @@ import { ScreenPoller } from "./poll.ts";
 import { AgentCell } from "./view/cell.ts";
 import { TeamGrid } from "./view/grid.ts";
 import { MentionProvider } from "./ui/mention.ts";
-import { bold, dim, fg, inverse, memberFg } from "./ui/ansi.ts";
+import { BLUE_LIGHT, bold, chip, dim, fg, memberFg } from "./ui/ansi.ts";
 import type { Member, TeamConfig } from "./types.ts";
 
 const SELECT_LIST_THEME = {
@@ -30,7 +30,7 @@ const SELECT_LIST_THEME = {
 };
 
 const EDITOR_THEME: EditorTheme = {
-  borderColor: (s: string) => dim(s),
+  borderColor: (s: string) => fg(BLUE_LIGHT, s), // 输入框两条线：浅蓝
   selectList: SELECT_LIST_THEME,
 };
 
@@ -141,10 +141,15 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     }
     invalidate(): void {}
     render(width: number): string[] {
-      const content = ` Krystal ${dim("│")} ${this.parts} ${dim("│ :to <name> 锁定 · :quit 退出")} `;
-      const vis = visibleWidth(this.parts) + 44;
-      const pad = " ".repeat(Math.max(0, width - vis));
-      return [inverse(truncateToWidth(content + pad, width))];
+      // Starship 风格分段：蓝底品牌胶囊 + 成员状态 + 最近动作 + 提示（无整条反色底）
+      const brand = chip(" ⚡ Krystal ");
+      const team = bold(config.name);
+      const sep = " " + dim("·") + " ";
+      const hints = dim(":to 锁定 · :quit 退出");
+      const content = ` ${brand}  ${team}${sep}${this.parts}${sep}${hints} `;
+      const vis = visibleWidth(content);
+      if (vis >= width) return [truncateToWidth(content, width, "…")];
+      return [content + " ".repeat(width - vis)];
     }
   }
   const status = new StatusBar();
@@ -158,8 +163,8 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         return `${dotCh} ${m.name}${locked}`;
       })
       .join(dim(" │ "));
-    const action = lastAction ? dim(` │ ${truncateToWidth(lastAction, 48, "…")}`) : "";
-    status.set(`${parts}${action}`);
+    const action = lastAction ? dim(`${truncateToWidth(lastAction, 48, "…")}`) : "";
+    status.set(action ? `${parts} ${dim("·")} ${action}` : parts);
     tui.requestRender();
   };
 
@@ -267,26 +272,9 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       this.ed.invalidate();
     }
     render(width: number): string[] {
-      const inner = this.ed.render(Math.max(10, width - 2));
-      const out: string[] = [];
-      const border = (s: string) => dim(s);
-      inner.forEach((line, i) => {
-        const stripped = visibleWidth(line) >= 0 ? line : line;
-        const isEdge = (i === 0 || i === inner.length - 1) && stripped.includes("─");
-        if (isEdge) {
-          const corners = i === 0 ? ["╭", "╮"] : ["╰", "╯"];
-          const a = line.indexOf("─");
-          const b = line.lastIndexOf("─");
-          let l = line;
-          if (a >= 0) l = l.slice(0, a) + corners[0] + l.slice(a + 1);
-          if (b >= 0) l = l.slice(0, b) + corners[1] + l.slice(b + 1);
-          out.push(l);
-        } else {
-          const padLen = Math.max(0, width - 2 - visibleWidth(stripped));
-          out.push(border("│") + line + " ".repeat(padLen) + border("│"));
-        }
-      });
-      return out;
+      // 直接采用 pi-tui 的原生渲染（它自己用 EditorTheme.borderColor 画上下两条线，
+      // 我方的边框重写会被渲染层的 SGR 规范化吃掉颜色）
+      return this.ed.render(width);
     }
   }
   const editorFrame = new EditorFrame(editor);
