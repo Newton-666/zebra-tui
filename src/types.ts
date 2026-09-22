@@ -20,12 +20,14 @@ export interface TeamConfig {
   members: Member[];
   paneIds?: Record<string, string>; // memberId -> tmux pane id (persisted)
   gridRatios?: number[];            // 列宽比例（可拖拽分隔线调整）
+  briefed?: string[];               // 已注入团队简报的成员 id
 }
 
 export type HistoryEvent =
   | { t: string; type: "team_created"; config: TeamConfig }
   | { t: string; type: "dispatch"; to: string[]; text: string }   // to = member ids
   | { t: string; type: "screen"; member: string; lines: string[] } // captured pane screen (ansi)
+  | { t: string; type: "relay"; from: string; to: string; text: string } // 成员之间的消息中继
   | { t: string; type: "note"; text: string };                      // system notes
 
 export const DEFAULT_COMMANDS: Record<MemberType, { command: string; resume?: string }> = {

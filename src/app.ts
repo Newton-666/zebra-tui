@@ -1,4 +1,6 @@
 // zebra — main app: header / team grid / status / editor
+import fs from "node:fs";
+import path from "node:path";
 import {
   Editor,
   matchesKey,
@@ -12,8 +14,9 @@ import {
   type Focusable,
   type TUI,
 } from "../deps/pi-tui/dist/index.js";
-import { ensureTeamSession, sendText, syncPaneWidths } from "./agents.ts";
-import { appendEvent, saveTeamConfig } from "./team.ts";
+import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
+import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
+import { briefText } from "./kit.ts";
 import { ScreenPoller } from "./poll.ts";
 import { AgentCell } from "./view/cell.ts";
 import { TeamGrid } from "./view/grid.ts";
@@ -40,7 +43,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
 
   // --- engine
   let paneIds = ensureTeamSession(config, true);
-  const poller = new ScreenPoller(() => paneIds, config.members, config.id);
+  const poller = new ScreenPoller(() => paneIds, config.members, config.id, (m, pane) => respawnPane(config, m, pane));
 
   // --- header: KRYSTAL logo（ANSI Shadow 字体，与 hermes banner 同款）+ 全宽圆角框
   const SHADOW: Record<string, string[]> = {
@@ -234,6 +237,18 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       renderStatus();
       return;
     }
+    if (trimmed === ":brief" || trimmed.startsWith(":brief ")) {
+      const arg = trimmed.slice(6).trim();
+      const targets = arg
+        ? config.members.filter((mm) => mm.name === arg || mm.id === arg)
+        : [...config.members];
+      let n = 0;
+      for (const m of targets) if (injectBrief(m)) n++;
+      lastAction = `已向 ${n} 名成员重发团队简报`;
+      saveTeamConfig(config);
+      renderStatus();
+      return;
+    }
     if (trimmed === ":team") {
       paneIds = ensureTeamSession(config, true);
       lastAction = "tmux 会话已重建";
@@ -295,6 +310,55 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     renderStatus();
   };
   poller.start();
+
+  // --- 团队简报注入：成员启动就绪后告诉它「你是谁 / 队友是谁 / 怎么通信」
+  const briefed = new Set<string>(config.briefed ?? []);
+  const injectBrief = (m: Member): boolean => {
+    const idx = config.members.indexOf(m);
+    const paneId = paneIds[idx];
+    if (!paneId || !paneAlive(paneId)) return false;
+    try {
+      sendText(paneId, briefText(config, m.id));
+    } catch {
+      return false;
+    }
+    briefed.add(m.id);
+    appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name} 注入团队简报` });
+    return true;
+  };
+  let briefTicks = 0;
+  const briefTimer = setInterval(() => {
+    briefTicks++;
+    for (const m of config.members) {
+      if (briefed.has(m.id)) continue;
+      const f = poller.feeds.get(m.id)!;
+      const ready = f.alive && f.lines.filter((l) => l.trim().length > 0).length >= 3;
+      if (ready) injectBrief(m);
+    }
+    if (briefed.size >= config.members.length || briefTicks > 15) {
+      clearInterval(briefTimer);
+      config.briefed = [...briefed];
+      saveTeamConfig(config);
+      renderStatus();
+    }
+  }, 2000);
+  briefTimer.unref?.();
+
+  // --- 成员互相通信的中继显示（由会话内 `zebra send` 写入 last-relay）
+  let lastRelayText = "";
+  const relayTimer = setInterval(() => {
+    try {
+      const t = fs.readFileSync(path.join(sessionDir(config.id), "last-relay"), "utf8").trim();
+      if (t && t !== lastRelayText) {
+        lastRelayText = t;
+        lastAction = `⇄ ${truncateToWidth(t, 60, "…")}`;
+        renderStatus();
+      }
+    } catch {
+      /* 还没有中继发生 */
+    }
+  }, 1500);
+  relayTimer.unref?.();
 
   // 启动后同步一次引擎窗格宽度（首次渲染完成后 geometry 才可用）
   const startupSync = setTimeout(() => {

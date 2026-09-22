@@ -1,0 +1,203 @@
+// Krystal — 团队工具包：为每个成员生成会话内协作命令（krystal）+ 团队简报（BRIEF.md）
+// 成员在自己终端里执行 krystal roster / send / board，即可感知队友并互通消息
+import fs from "node:fs";
+import path from "node:path";
+import { sessionDir } from "./team.ts";
+import type { TeamConfig } from "./types.ts";
+
+const HELPER = `#!/usr/bin/env node
+// krystal — Krystal 团队内协作工具（由 Krystal 生成，成员在自己终端里使用）
+// 注意：会话目录位于项目内（package.json type=module），因此使用 ESM 语法
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+
+const HOME = process.env.ZEBRA_HOME;
+const ME = process.env.ZEBRA_MEMBER || "unknown";
+if (!HOME) {
+  console.error("krystal: 缺少 ZEBRA_HOME（请从 Krystal 启动的成员窗格内运行）");
+  process.exit(1);
+}
+const cfgPath = path.join(HOME, "team.json");
+const boardPath = path.join(HOME, "board.md");
+const relayPath = path.join(HOME, "last-relay");
+
+function cfg() {
+  if (!fs.existsSync(cfgPath)) {
+    console.error("krystal: 找不到团队配置 " + cfgPath + "（会话可能已删除）");
+    process.exit(1);
+  }
+  return JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+}
+function tmux(args) {
+  try {
+    return execFileSync("tmux", args, { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"], timeout: 5000 });
+  } catch (e) {
+    return null;
+  }
+}
+function me(c) {
+  return c.members.find((m) => m.id === ME || m.name === ME) || { id: ME, name: ME, type: "?" };
+}
+function paneAlive(id) {
+  const out = tmux(["display-message", "-p", "-t", id, "#{pane_dead}"]);
+  return out !== null && out.trim() === "0";
+}
+function appendHistory(ev) {
+  try {
+    fs.appendFileSync(path.join(HOME, "history.jsonl"), JSON.stringify(ev) + "\\n");
+  } catch {}
+}
+
+function cmdWhoami(c) {
+  const m = me(c);
+  console.log(\`团队「\${c.name}」成员：\${m.name}（类型 \${m.type}）\`);
+  console.log(\`队友：\${c.members.filter((x) => x.id !== m.id).map((x) => x.name).join("、") || "（无）"}\`);
+}
+
+function cmdRoster(c) {
+  const self = me(c);
+  console.log(\`团队「\${c.name}」（\${c.members.length} 名成员）\`);
+  for (const m of c.members) {
+    const pane = c.paneIds && c.paneIds[m.id];
+    const alive = pane ? (paneAlive(pane) ? "● 在线" : "✗ 已退出") : "? 无窗格";
+    const tag = m.id === self.id ? "（你）" : "";
+    console.log(\`  \${m.name.padEnd(10)} \${String(m.type).padEnd(8)} \${alive}\${tag}\`);
+  }
+}
+
+function cmdSend(c, args) {
+  const name = args[0];
+  const text = args.slice(1).join(" ").trim();
+  if (!name || !text) {
+    console.error("用法: krystal send <队友名> <消息>");
+    process.exit(2);
+  }
+  const self = me(c);
+  const target = c.members.find((m) => m.name === name || m.id === name);
+  if (!target) {
+    console.error(\`找不到队友「\${name}」，可用：\${c.members.map((m) => m.name).join("、")}\`);
+    process.exit(2);
+  }
+  const pane = c.paneIds && c.paneIds[target.id];
+  if (!pane) {
+    console.error(\`队友「\${target.name}」没有可用的窗格（请让 Krystal 执行 :team 重建）\`);
+    process.exit(1);
+  }
+  if (!paneAlive(pane)) {
+    console.error(\`队友「\${target.name}」的窗格已退出（请让 Krystal 执行 :team 重建）\`);
+    process.exit(1);
+  }
+  const line = \`[from \${self.name}] \${text}\`;
+  tmux(["send-keys", "-t", pane, "-l", "--", line]);
+  tmux(["send-keys", "-t", pane, "Enter"]);
+  const stamp = new Date().toISOString();
+  appendHistory({ t: stamp, type: "relay", from: self.name, to: target.name, text });
+  try {
+    fs.writeFileSync(relayPath, \`\${self.name} → \${target.name}: \${text}\`);
+  } catch {}
+  console.log(\`✓ 已发送给 \${target.name}: \${text}\`);
+}
+
+function cmdBoard(_c, args) {
+  if (args.length > 0) {
+    const self = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const m = me(self);
+    const entry = \`- [\${new Date().toISOString().slice(0, 16).replace("T", " ")}] \${m.name}: \${args.join(" ")}\`;
+    fs.appendFileSync(boardPath, entry + "\\n");
+    appendHistory({ t: new Date().toISOString(), type: "note", text: \`白板追加（\${m.name}）: \${args.join(" ")}\` });
+    console.log("✓ 已追加到团队白板");
+    return;
+  }
+  if (!fs.existsSync(boardPath)) {
+    console.log("（团队白板还是空的，用 krystal board <内容> 追加）");
+    return;
+  }
+  console.log(fs.readFileSync(boardPath, "utf8").trimEnd());
+}
+
+function cmdHelp() {
+  console.log(\`krystal — Krystal 团队协作命令
+  krystal whoami                确认自己的身份
+  krystal roster                查看队友与在线状态
+  krystal send <队友> <消息>     给队友发消息（出现在对方会话，前缀 [from 你]）
+  krystal board [内容]           查看 / 追加团队白板（异步协作）
+  krystal help                  本帮助\`);
+}
+
+const [, , cmd, ...args] = process.argv;
+const c = cfg();
+switch (cmd) {
+  case undefined:
+  case "help":
+  case "-h":
+    cmdHelp();
+    break;
+  case "whoami":
+    cmdWhoami(c);
+    break;
+  case "roster":
+    cmdRoster(c);
+    break;
+  case "send":
+    cmdSend(c, args);
+    break;
+  case "board":
+    cmdBoard(c, args);
+    break;
+  default:
+    console.error(\`未知命令：\${cmd}（krystal help 查看用法）\`);
+    process.exit(2);
+}
+`;
+
+export function briefText(config: TeamConfig, memberId: string): string {
+  const me = config.members.find((m) => m.id === memberId)!;
+  const others = config.members.filter((m) => m.id !== memberId).map((m) => `${m.name}(${m.type})`);
+  const home = sessionDir(config.id);
+  // 注意：必须单行——send-keys 的换行会被 TUI 当作回车逐行提交
+  return [
+    `[Krystal 团队简报] 你是团队「${config.name}」的成员「${me.name}」，队友：${others.join("、") || "（无）"}。`,
+    `协作命令（在你的终端里执行）：krystal whoami 确认身份 · krystal roster 看队友与状态 ·`,
+    `krystal send <队友> <消息> 给队友发消息（对方会看到，前缀 [from ${me.name}]）· krystal board [内容] 团队白板。`,
+    `若 PATH 里找不到，用绝对路径 ${home}/bin/krystal。收到 [from X] 开头的消息即来自队友 X，回复用 krystal send X <消息>。简报全文：${home}/BRIEF.md`,
+  ].join(" ");
+}
+
+/** 生成会话工具包（bin/krystal）与团队简报（BRIEF.md）。幂等，可反复调用。 */
+export function ensureKit(config: TeamConfig): void {
+  const dir = sessionDir(config.id);
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  const helper = path.join(bin, "krystal");
+  fs.writeFileSync(helper, HELPER);
+  fs.chmodSync(helper, 0o755);
+  if (!fs.existsSync(path.join(dir, "board.md"))) {
+    fs.writeFileSync(path.join(dir, "board.md"), `# ${config.name} 团队白板\n\n`);
+  }
+  const lines: string[] = [
+    `# ${config.name} — 团队简报`,
+    ``,
+    `本团队由 Krystal 编排，共 ${config.members.length} 名成员：`,
+    ...config.members.map((m) => `- **${m.name}**（${m.type}）${m.command ? `— \`${m.command}\`` : ""}`),
+    ``,
+    `## 你与队友的协作方式`,
+    ``,
+    `在你的终端里执行（Krystal 已把 \`krystal\` 放进你们的 PATH；若被 profile 重置 PATH，用绝对路径 \`${bin}/krystal\`）：`,
+    ``,
+    "```",
+    `krystal whoami            确认自己的身份`,
+    `krystal roster            查看队友与在线状态`,
+    `krystal send <队友> <消息>  给队友发消息（出现在对方会话，前缀 [from 你]）`,
+    `krystal board [内容]       查看 / 追加团队白板（异步协作）`,
+    "```",
+    ``,
+    `- 收到 \`[from X]\` 开头的消息 = 队友 X 发来的，回复用 \`krystal send X <消息>\``,
+    `- 需要人工介入（改代码、审批、环境问题）时，直接在会话里说明即可，人类在 Krystal 里看着所有成员`,
+    `- 共享状态请写白板，避免互相刷屏`,
+    ``,
+    `工作目录：\`${config.cwd}\``,
+    `引擎会话：\`${config.tmuxSession}\``,
+  ];
+  fs.writeFileSync(path.join(dir, "BRIEF.md"), lines.join("\n") + "\n");
+}

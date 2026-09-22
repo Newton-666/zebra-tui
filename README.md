@@ -65,9 +65,46 @@ ln -sf "$PWD/zebra" ~/.local/bin/krystal
 | 行首 `@` | 弹出成员补全（↑↓ + enter） |
 | `@pi @kimi 消息` | 定向多个成员 |
 | `:to <name>` | 锁定默认目标（`◈` 标记，`:to all` 解除） |
+| `:brief` | 重发团队简报（` :brief <name>` 只发给某成员） |
 | `:team` | tmux 引擎丢失时重建 |
 | `:quit` / `ctrl+c` | 退出（tmux 引擎保留在后台） |
 | 拖拽分隔线 | 调整列宽（同时缩放引擎窗格） |
+
+## 团队感知与通信（v0.2 核心）
+
+成员之间**互相知道彼此存在，并能直接通信**——不需要人类中转。
+
+**① 身份注入**：每个成员窗格启动时带上身份环境变量：
+
+```
+ZEBRA_SESSION=<会话 id>   ZEBRA_MEMBER=<成员名>   ZEBRA_HOME=<会话目录>
+PATH=<会话目录>/bin:$PATH        # 会话工具 `krystal` 可用
+```
+
+**② 团队简报**：成员就绪后自动收到一条单行简报（自己是谁、队友有谁、怎么协作），
+全文写在 `sessions/<id>/BRIEF.md`。已注入的成员记在 `team.json` 的 `briefed`，不会重复打扰；
+需要重发用 `:brief`。
+
+**③ 会话内协作命令** `krystal`（每个成员在自己终端里执行）：
+
+| 命令 | 作用 |
+|---|---|
+| `krystal whoami` | 确认自己的身份 |
+| `krystal roster` | 查看队友与在线状态 |
+| `krystal send <队友> <消息>` | 给队友发消息（出现在对方会话里，前缀 `[from 你]`） |
+| `krystal board [内容]` | 查看 / 追加团队白板（异步协作，落在 `board.md`） |
+
+**④ 中继可视化**：成员互发的消息会实时显示在 Krystal 状态条（`⇄ pi → hermes: …`），
+并作为 `relay` 事件写进团队历史。
+
+**真实运行片段**（两个 agent 自主完成的协作，无人中转）：
+
+```
+⇄ pi → hermes: pi 在线确认。建议分工：我负责阅读/分析代码与文档，你负责多模型交叉验证与实现复核…
+▤ 白板登记: pi 已就绪：环境自检通过（whoami/roster 正常）…等 Krystal 派发具体任务。
+⇄ hermes → pi: hi pi，hermes 上线。我刚确认了 whoami/roster，白板目前是空的。我看到工作区有未提交改动…
+```
+
 
 ## 团队历史（Krystal 自己的历史，不是 pi 的）
 
@@ -111,9 +148,15 @@ src/
 ├── agents.ts        tmux 引擎（建格 / 分发 / 捕获 / 复活 / 窗格同步）
 ├── poll.ts          画面轮询 + 死格自动复活
 ├── team.ts          团队历史存储
+├── kit.ts           团队工具包（bin/krystal 协作命令 + BRIEF.md 简报）
 └── ui/              ansi / @补全 provider
 ```
 
 ## 变更历史
 
-每一版都提交到 git。当前 v0.1。
+每一版都提交到 git。
+
+- **v0.2.0** — 团队感知与通信：身份注入（ZEBRA_* 环境变量）+ 团队简报自动注入 + 会话内 `krystal` 协作命令（whoami/roster/send/board）+ 中继可视化（状态条 ⇄ / relay 事件）+ 共享白板
+- v0.1.2 — 输入框蓝色主题、状态条重做为分段式（蓝底品牌胶囊）
+- v0.1.1 — logo 改用 ANSI Shadow 字体（与 hermes banner 同款）+ 青蓝渐变
+- v0.1 — 首版：pi-tui 前端 + tmux 引擎 + 团队历史 + 可拖拽分隔线

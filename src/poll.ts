@@ -1,6 +1,6 @@
 // zebra — screen poller: diff member panes, auto-revive dead panes, feed cells + history
 import { appendEvent } from "./team.ts";
-import { captureScreen, paneAlive, respawnPane } from "./agents.ts";
+import { captureScreen, paneAlive } from "./agents.ts";
 import type { Member } from "./types.ts";
 
 export interface MemberFeed {
@@ -24,11 +24,19 @@ export class ScreenPoller {
   private sessionId: string;
   private intervalMs: number;
   private getPaneIds: () => string[];
+  private revivePane: (m: Member, paneId: string) => void;
 
-  constructor(getPaneIds: () => string[], members: Member[], sessionId: string, intervalMs = 350) {
+  constructor(
+    getPaneIds: () => string[],
+    members: Member[],
+    sessionId: string,
+    revivePane: (m: Member, paneId: string) => void,
+    intervalMs = 350,
+  ) {
     this.getPaneIds = getPaneIds;
     this.members = members;
     this.sessionId = sessionId;
+    this.revivePane = revivePane;
     this.intervalMs = intervalMs;
     for (const m of members) {
       this.feeds.set(m.id, { lines: [], changedAt: 0, alive: true });
@@ -99,7 +107,7 @@ export class ScreenPoller {
     this.reviveAttempts[m.id] = (this.reviveAttempts[m.id] ?? 0) + 1;
     this.lastRevive[m.id] = now;
     try {
-      respawnPane(paneId, m.resumeCommand || m.command);
+      this.revivePane(m, paneId);
       appendEvent(this.sessionId, {
         t: new Date().toISOString(),
         type: "note",

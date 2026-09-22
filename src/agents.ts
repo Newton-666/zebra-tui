@@ -1,7 +1,24 @@
 // zebra — tmux engine: create panes per member, dispatch, capture, sync
 import { execFileSync } from "node:child_process";
-import { saveTeamConfig } from "./team.ts";
+import path from "node:path";
+import { saveTeamConfig, sessionDir } from "./team.ts";
+import { ensureKit } from "./kit.ts";
 import type { Member, TeamConfig } from "./types.ts";
+
+/** 成员窗格的环境：身份 + 会话工具包 PATH（`zebra roster/send/board` 可用） */
+function envArgs(config: TeamConfig, member: Member): string[] {
+  const home = sessionDir(config.id);
+  const bin = path.join(home, "bin");
+  const env: Record<string, string> = {
+    ZEBRA_SESSION: config.id,
+    ZEBRA_MEMBER: member.id,
+    ZEBRA_HOME: home,
+    PATH: `${bin}:${process.env.PATH ?? ""}`,
+  };
+  const args: string[] = [];
+  for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
+  return args;
+}
 
 function tmux(args: string[]): string {
   try {
@@ -38,10 +55,11 @@ export function sessionAlive(name: string): boolean {
 export function createTeamSession(config: TeamConfig): string[] {
   const name = config.tmuxSession;
   if (sessionAlive(name)) killSession(name);
+  ensureKit(config); // 生成 bin/zebra + BRIEF.md
 
   const first = config.members[0];
   // -x/-y: detached 会话默认 80x24，split 后每格过小，部分 TUI 会直接退出
-  tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", "-c", config.cwd, first.command]);
+  tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", ...envArgs(config, first), "-c", config.cwd, first.command]);
 
   // 排列与 zebra 网格对齐：i=1 横切分两列；i>=2 竖切到同列队友(i-2)下方
   // 每个 pane 创建后立刻 remain-on-exit，命令秒退也不会破坏链路
@@ -56,6 +74,7 @@ export function createTeamSession(config: TeamConfig): string[] {
     const out = tmux([
       "split-window",
       ...flags,
+      ...envArgs(config, config.members[i]),
       "-t",
       anchor,
       "-c",
@@ -81,7 +100,7 @@ export function createTeamSession(config: TeamConfig): string[] {
   config.members.forEach((m, i) => {
     if (!paneAlive(paneIds[i]!)) {
       try {
-        respawnPane(paneIds[i]!, m.resumeCommand || m.command);
+        respawnPane(config, m, paneIds[i]!);
       } catch {
         /* poller 会继续重试 */
       }
@@ -163,9 +182,10 @@ export function paneAlive(paneId: string): boolean {
   }
 }
 
-/** Revive a dead (remain-on-exit) pane with the member's command. */
-export function respawnPane(paneId: string, command: string): void {
-  tmux(["respawn-pane", "-k", "-t", paneId, command]);
+/** Revive a dead (remain-on-exit) pane with the member's command（保留身份环境）. */
+export function respawnPane(config: TeamConfig, member: Member, paneId: string): void {
+  const command = member.resumeCommand || member.command;
+  tmux(["respawn-pane", "-k", ...envArgs(config, member), "-t", paneId, command]);
 }
 
 /** Sync engine panes to grid geometry: resize window, then set first-column pane width. */
