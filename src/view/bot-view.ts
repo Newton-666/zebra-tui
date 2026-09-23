@@ -32,7 +32,9 @@ import {
   loadEvents,
   listBotSessions,
   messagesFrom,
+  renameSession,
   touchSession,
+  trashSession,
 } from "../session.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
@@ -212,7 +214,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   const resumed = resumeId ? loadBotMeta(resumeId) : undefined;
   let sessionId = resumed?.id ?? createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
   let usage = resumed ? lastUsage(loadEvents(sessionId)) : undefined;
+  let sessionName: string | undefined = resumed ? loadBotMeta(sessionId)?.name : undefined; // /name 设置
   let picker: SelectList | undefined;
+  let deleteArmed: string | undefined; // 两次 d 删除：第一次只武装并提示
   let foldCount = 0; // 本回合折叠的工具输出条数（上下文回收的可见性）
   let summaryActive = resumed ? !!lastSummary(loadEvents(sessionId)) : false;
   // 本地「前缀稳定性」：与上一回合的稳定前缀逐字节比对（provider 不报 cached_tokens 时的可靠判据）
@@ -308,7 +312,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         const firstUser = msgs.find((e) => e.role === "user");
         return {
           value: m.id,
-          label: `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
+          label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
           description: `${m.model} · ${msgs.length} 条消息 · ${firstUser?.content.slice(0, 36) ?? "(空)"}`,
         };
       }),
@@ -324,7 +328,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       tui.requestRender();
     };
     picker = list;
-    push("", dim("  回溯历史（↑↓ 选择 · enter 恢复 · esc 取消）"), list);
+    push("", dim("  回溯历史（↑↓ 选择 · enter 恢复 · esc 取消 · d 删除）"), list);
     refresh();
   };
 
@@ -358,7 +362,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const cache = usage && usage.cached > 0 ? `${Math.round((usage.cached / usage.prompt) * 100)}%` : "—";
       const tok = usage ? `${usage.prompt} tok` : `~${tokens.toFixed(0)} tok`;
       const pfx = prefixStable === undefined ? "前缀 —" : prefixStable ? "前缀 稳定" : "前缀 变化";
-      const sid = sessionId.replace(/^bot-/, "").slice(0, 15);
+      const sid = sessionName ? `${sessionName}` : sessionId.replace(/^bot-/, "").slice(0, 15);
       const extra = `${foldCount ? `折叠 ${foldCount} · ` : ""}${summaryActive ? "摘要 有 · " : ""}`;
       const ctxText = cs.level === "ok" ? dim(cs.label) : cs.level === "fold" ? fg(BLUE_LIGHT, cs.label) : bold(fg(BLUE_LIGHT, `${cs.label} ▲`));
       const seg = `${sid} · ${busy ? state : "空闲"} · ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
@@ -572,15 +576,29 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         summaryActive = false;
         push(dim("  新会话已开始"), "");
         refresh();
+      } else if (cmd.startsWith("name")) {
+        const nm = body.slice(body.indexOf("name") + 4).trim();
+        if (!nm) {
+          push(dim(`  当前会话名：${sessionName ?? "（未命名）"}  用法：/name <名称>`), "");
+        } else {
+          const m = renameSession(sessionId, nm);
+          sessionName = m?.name;
+          if (m) push(dim(`  会话已命名为「${m.name}」（历史列表 /resume 里可见）`), "");
+          else push(fg("31", "  命名失败（会话元数据不可写）"), "");
+        }
+        refresh();
       } else if (cmd === "memory" || cmd === "mem") {
         const g = renderGraph();
         push("", ...g.lines.map((l) => (l.startsWith("●") || l.startsWith("○") ? fg("36", l) : dim(l))), "");
         refresh();
       } else if (cmd === "help") {
-        push(dim("  /resume 回溯历史 · /memory 看记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"), "");
+        push(
+          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /memory 记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"),
+          "",
+        );
         refresh();
       } else {
-        push(dim(`  未知命令 ${body}（可用 /resume · /memory · /new · /help）`), "");
+        push(dim(`  未知命令 ${body}（可用 /resume · /name · /memory · /new · /help）`), "");
         refresh();
       }
       return;
@@ -617,6 +635,39 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         return;
       }
       if (picker) {
+        // 两次 d 删除：第一次武装并提示，第二次才真正移入 .trash（可恢复）
+        if (data === "d" || data === "D") {
+          const sel = picker.getSelectedItem();
+          const id = sel && sel.value !== "__cancel" ? sel.value : undefined;
+          if (!id) {
+            push(dim("  （「取消」不可删除）"));
+            refresh();
+            return;
+          }
+          if (deleteArmed !== id) {
+            deleteArmed = id;
+            const label = String(sel?.label ?? id);
+            push(fg("33", `  ⚠ 再按一次 d 即删除会话「${label}」——移入 sessions/.trash（可手动恢复），按其他键取消`));
+            refresh();
+            return;
+          }
+          const r = trashSession(id);
+          deleteArmed = undefined;
+          if (r.ok) {
+            picker = undefined;
+            transcript.items = [dim(`  已删除会话 ${id}（移入 .trash，可手动恢复）`)];
+            if (id === sessionId) sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
+            refresh();
+          } else {
+            push(fg("31", `  删除失败：${r.error ?? "未知错误"}`));
+            refresh();
+          }
+          return;
+        }
+        if (deleteArmed) {
+          deleteArmed = undefined; // 其他键 → 取消武装
+          push(dim("  （已取消删除）"));
+        }
         picker.handleInput(data);
         return;
       }

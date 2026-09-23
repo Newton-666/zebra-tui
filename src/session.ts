@@ -8,6 +8,8 @@ import { SESSIONS_DIR } from "./team.ts";
 export interface BotMeta {
   id: string;
   kind: "bot";
+  /** 会话名（/name 设置；用于历史列表与状态行） */
+  name?: string;
   cwd: string;
   model: string;
   tier: string;
@@ -84,6 +86,36 @@ export function touchSession(id: string): void {
     fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);
   } catch {
     /* 降级 */
+  }
+}
+
+/** /name <名称>：给会话命名（写入 bot.json，不改事件流） */
+export function renameSession(id: string, name: string): BotMeta | undefined {
+  const m = loadBotMeta(id);
+  if (!m) return undefined;
+  m.name = name.trim().slice(0, 40) || undefined;
+  m.updatedAt = new Date().toISOString();
+  try {
+    fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);
+  } catch {
+    return undefined;
+  }
+  return m;
+}
+
+/** 删除会话：**移入 sessions/.trash/<id>-<ts>**（可手动恢复），不做不可逆删除 */
+export function trashSession(id: string): { ok: boolean; where?: string; error?: string } {
+  if (!id || id.includes("/") || id.includes("..")) return { ok: false, error: "非法的会话 id" };
+  const from = dirOf(id);
+  if (!fs.existsSync(from)) return { ok: false, error: "会话不存在" };
+  if (path.dirname(from) !== path.resolve(SESSIONS_DIR)) return { ok: false, error: "越出会话目录（拒绝）" };
+  const where = path.join(path.resolve(SESSIONS_DIR), ".trash", `${id}-${Date.now().toString(36)}`);
+  try {
+    fs.mkdirSync(path.dirname(where), { recursive: true });
+    fs.renameSync(from, where);
+    return { ok: true, where };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 

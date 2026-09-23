@@ -91,6 +91,21 @@ const g = M.renderGraph();
 assert.ok(g.lines[0]!.includes("记忆图") && g.lines.some((l) => l.includes("实体关联")), "图含统计与关联边");
 console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.edges} 关联`);
 
+// ── 会话命名与安全删除（/name · /resume 里两次 d）
+{
+  const S = await import("../src/session.ts");
+  const m = S.createBotSession({ cwd: "/tmp/x", model: "demo", tier: "阅读者" });
+  assert.equal(S.loadBotMeta(m.id)?.name, undefined, "默认无名");
+  const renamed = S.renameSession(m.id, "闸门调试");
+  assert.equal(renamed?.name, "闸门调试");
+  assert.equal(S.listBotSessions().find((x) => x.id === m.id)?.name, "闸门调试", "历史列表应显示名字");
+  const r = S.trashSession(m.id);
+  assert.ok(r.ok && r.where && fs.existsSync(r.where), "删除应为移入 .trash（可恢复）");
+  assert.ok(!fs.existsSync(path.join(process.env.KRISTAL_SESSIONS_DIR!, m.id)), "原目录应消失");
+  assert.ok(!S.trashSession("../../etc").ok, "非法 id 应拒绝");
+  console.log("11) 会话命名 + 两次 d 删除（移入 .trash）✓");
+}
+
 // ── 上下文占用与阈值预警（折叠线 70% / 摘要线 85%）
 {
   const { contextStatus, contextWindow } = await import("../src/session.ts");
