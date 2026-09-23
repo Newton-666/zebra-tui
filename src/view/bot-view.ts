@@ -203,6 +203,101 @@ class PickerBlock implements Component {
   }
 }
 
+/**
+ * 通用弹层选择器（照 bobo activeSessionSwitcher 的架构）：
+ * - 常驻 overlay（不是往对话流塞组件）→ 结构上不可能「堆出一堆」
+ * - 选择/删除由状态驱动：删除 = **原位过滤数组** + 选中夹到新长度（= 自动落在下一个）✓
+ * - `d` 两次删除：第一次武装（按会话 id 记录，不是行号），第二次删除；其他键取消武装
+ */
+export interface ListOverlayOpts {
+  title: string;
+  hint: string;
+  items: { value: string; label: string; description?: string }[];
+  onPick: (value: string) => void;
+  onCancel: () => void;
+  /** 返回错误文案表示失败；undefined = 成功（成功后内部会自动 reload） */
+  onDelete?: (id: string) => string | undefined;
+  reload?: () => { value: string; label: string; description?: string }[];
+  onChange?: () => void;
+}
+
+export class ListOverlay implements Component {
+  private o: ListOverlayOpts;
+  private items: { value: string; label: string; description?: string }[];
+  private list: SelectList;
+  private note = "";
+  private err = "";
+  private armed?: string;
+
+  constructor(o: ListOverlayOpts) {
+    this.o = o;
+    this.items = o.items;
+    this.list = this.buildList(o.items);
+  }
+
+  private buildList(items: { value: string; label: string; description?: string }[], keep?: string): SelectList {
+    const l = new SelectList(items, Math.min(items.length, 12), THEME);
+    const idx = keep ? items.findIndex((it) => it.value === keep) : 0;
+    l.setSelectedIndex(Math.max(0, Math.min(idx, items.length - 1)));
+    l.onSelect = (it: { value: string }) => this.o.onPick(it.value);
+    return l;
+  }
+
+  render(w: number): string[] {
+    const out: string[] = [];
+    out.push(bold(this.o.title));
+    out.push(this.err ? fg("31", this.err) : this.note ? fg("33", this.note) : dim(this.o.hint));
+    out.push("");
+    out.push(...this.list.render(w));
+    if (this.o.onDelete) out.push("", dim("  d 删除（连按两次确认）· esc 返回"));
+    return out;
+  }
+
+  handleInput(d: string): void {
+    if (this.armed) {
+      if (d.toLowerCase() === "d") {
+        const id = this.armed;
+        this.armed = undefined;
+        this.err = "";
+        const err = this.o.onDelete?.(id);
+        if (err) {
+          this.err = err;
+        } else {
+          this.items = this.o.reload?.() ?? this.items.filter((it) => it.value !== id);
+          const keep = undefined; // 删除后停在原索引 = 下一个会话
+          const prevIdx = 0;
+          void prevIdx;
+          this.list = this.buildList(this.items);
+          this.note = `已删除 ${id}（移入 .trash，可恢复）· 可继续按 d`;
+        }
+      } else {
+        this.armed = undefined;
+        this.note = "";
+      }
+      this.o.onChange?.();
+      return;
+    }
+    if (matchesKey(d, "escape")) {
+      this.o.onCancel();
+      return;
+    }
+    if ((d === "d" || d === "D") && this.o.onDelete) {
+      const sel = this.list.getSelectedItem();
+      if (sel?.value) {
+        this.armed = sel.value;
+        this.note = `再按一次 d 删除「${String(sel.label ?? sel.value)}」（移入 .trash，可恢复）`;
+        this.o.onChange?.();
+      }
+      return;
+    }
+    this.list.handleInput(d);
+  }
+
+  invalidate(): void {
+    this.list.invalidate();
+  }
+}
+
 export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> {
   const cfg: BuilderConfig | undefined = loadBuilder();
   const terminal = new ProcessTerminal();
@@ -321,91 +416,79 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     push(dim(`  已回溯到 ${id}`), "");
     refresh();
   };
-  /** 选择器块：提示行 + 列表一体，原位替换（绝不堆积多份） */
-  class PickerBlock implements Component {
-    note = "";
-    list: SelectList;
-    constructor(list: SelectList) {
-      this.list = list;
-    }
-    render(w: number): string[] {
-      const head = this.note ? fg("33", `  ${this.note}`) : dim("  回溯历史（↑↓ 恢复 · enter 确认 · d 删除 · esc 返回）");
-      return [head, ...this.list.render(w)];
-    }
-    invalidate(): void {
-      this.list.invalidate();
-    }
-  }
-  const removePickerBlock = (): void => {
-    const i = transcript.items.indexOf(pickerBlock as unknown as Component);
-    if (i >= 0) transcript.items.splice(i, 1);
-    picker = undefined;
-    pickerKind = undefined;
-    pickerBlock = undefined;
+  // ── 弹层选择器（照 bobo activeSessionSwitcher 的架构：真弹层 + 状态驱动 + d 两次删除）
+  // 不再往 transcript 里 push 组件（那是「一堆」的根源）
+  let overlayHandle: { hide: () => void } | undefined;
+  let overlayKeys: ((d: string) => void) | undefined;
+
+  const closeOverlay = (): void => {
+    overlayKeys = undefined;
+    overlayHandle?.hide();
+    overlayHandle = undefined;
   };
 
-  let sessionsUI: { block: PickerBlock; list: SelectList; sessions: BotMeta[] } | undefined;
-
-  const refreshSessionsList = (note?: string): void => {
-    if (!sessionsUI) return;
-    const prevSel = pickerSel;
-    sessionsUI.sessions = listBotSessions();
-    const items = sessionsUI.sessions.map((m) => {
-      const msgs = loadEvents(m.id).filter((e) => e.t === "msg");
-      const firstUser = msgs.find((e) => e.role === "user");
-      return {
-        value: m.id,
-        label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
-        description: `${m.model} · ${msgs.length} 条消息 · ${firstUser?.content.slice(0, 36) ?? "(空)"}`,
-      };
-    });
-    sessionsUI.list = new SelectList(items, Math.min(items.length, 12), THEME);
-    const idx = Math.max(0, Math.min(items.findIndex((it) => it.value === prevSel), items.length - 1));
-    sessionsUI.list.setSelectedIndex(idx);
-    sessionsUI.list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
-    sessionsUI.list.onSelect = (it: { value: string }) => {
-      removePickerBlock();
-      resumeSession(it.value);
-    };
-    sessionsUI.list.onCancel = () => removePickerBlock();
-    sessionsUI.block.list = sessionsUI.list;
-    if (note) sessionsUI.block.note = note;
+  const openOverlay = (picker: Component & { handleInput(d: string): void }, width = 92): void => {
+    closeOverlay();
+    const handle = tui.showOverlay(picker, { width, maxHeight: "70%", anchor: "center", margin: 2 });
+    handle.focus?.();
+    overlayKeys = (d: string) => picker.handleInput(d); // 平台的 overlay 自动聚焦不生效 → 显式转发
+    overlayHandle = handle;
   };
 
-  const msgs0 = (id: string) => loadEvents(id).filter((e) => e.t === "msg").length;
   const openSessionsPicker = (): void => {
-    const prevSel = pickerSel;
-    if (!sessionsUI) {
-      const sessions = listBotSessions();
-      const items = sessions.map((m) => ({
-        value: m.id,
-        label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
-        description: `${m.model} · ${msgs0(m)} 条消息`,
-      }));
-      sessionsUI = { block: new PickerBlock(new SelectList(items, Math.min(items.length, 12), THEME)), list: new SelectList(items, 12, THEME), sessions };
-    }
-    sessionsUI.sessions = listBotSessions();
-    const items = sessionsUI.sessions.map((m) => ({
+    const sessions = listBotSessions();
+    const items = sessions.map((m) => ({
       value: m.id,
       label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
-      description: `${m.model} · ${msgs0(m)} 条消息`,
+      description: `${m.model} · ${m.events ?? 0}`,
     }));
-    const list = new SelectList(items, Math.min(items.length, 12), THEME);
-    const idx = Math.max(0, Math.min(items.findIndex((it) => it.value === pickerSel), items.length - 1));
-    list.setSelectedIndex(idx);
-    list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
-    list.onSelect = (it: { value: string }) => {
-      removePickerBlock();
-      resumeSession(it.value);
-    };
-    list.onCancel = () => removePickerBlock();
-    sessionsUI.block.list = list;
-    sessionsUI.block.note = "";
-    picker = list;
-    pickerKind = "sessions";
-    pickerBlock = sessionsUI.block; // d 的处理依赖它
-    transcript.items.push(sessionsUI.block);
-    refresh();
+    const picker = new ListOverlay({
+      title: "回溯历史",
+      hint: "↑↓ 选择 · enter 恢复 · d 删除 · esc 返回",
+      items,
+      onPick: (v) => {
+        closeOverlay();
+        resumeSession(v);
+      },
+      onCancel: closeOverlay,
+      onDelete: (id) => {
+        const r = trashSession(id);
+        if (!r.ok) return `删除失败：${r.error ?? "未知错误"}`;
+        if (id === sessionId) {
+          sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
+          setSessionMode(sessionId, mode);
+        }
+        return undefined;
+      },
+      reload: () =>
+        listBotSessions().map((m) => ({
+          value: m.id,
+          label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
+          description: `${m.model}`,
+        })),
+      onChange: () => tui.requestRender(),
+    });
+    openOverlay(picker);
+  };
+
+  const openModePicker = (): void => {
+    const picker = new ListOverlay({
+      title: "终端模式",
+      hint: "↑↓ 选择 · enter 确认 · esc 取消",
+      items: [
+        { value: "readonly", label: "Read Only（只读）", description: "白名单通过；写类命令被拦" },
+        { value: "full", label: "Full access（完全访问）", description: "白名单直通 · 灰名单放行 · 删除类与覆盖已被黑名单拦截" },
+      ],
+      onPick: (v) => {
+        closeOverlay();
+        mode = v as Mode;
+        setSessionMode(sessionId, mode);
+        push(dim(`  终端模式已切换：${modeLabel(mode)}（立即生效）`), "");
+        refresh();
+      },
+      onCancel: closeOverlay,
+    });
+    openOverlay(picker, 74);
   };
 
   const headerComp: Component = {
@@ -665,34 +748,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
       }
       else if (cmd === "mode") {
-        removePickerBlock();
-        const items = [
-          { value: "readonly", label: "Read Only（只读）", description: "白名单通过；写类命令被拦。最安全，适合看代码 / 调研" },
-          { value: "full", label: "Full access（完全访问）", description: "白名单直通；灰名单（建/改文件、git add·commit、构建测试）放行；删除类与覆盖已存在文件被黑名单拦截" },
-          { value: "__cancel", label: "取消", description: `当前：${modeLabel(mode)}` },
-        ];
-        const list = new SelectList(items, items.length, THEME);
-        const sel = items.findIndex((it) => it.value === mode);
-        list.setSelectedIndex(sel >= 0 ? sel : 0);
-        list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
-        list.onSelect = (it: { value: string }) => {
-          removePickerBlock();
-          if (it.value !== "__cancel") {
-            mode = it.value as Mode;
-            setSessionMode(sessionId, mode);
-            push(dim(`  终端模式已切换：${modeLabel(mode)}（立即生效）`), "");
-          }
-          refresh();
-        };
-        list.onCancel = () => removePickerBlock();
-        picker = list;
-        pickerKind = "mode";
-        pickerBlock = new PickerBlock(list);
-        pickerBlock.note = "终端模式（↑↓ 选择 · enter 确认 · esc 取消）";
-        transcript.items.push(pickerBlock);
-        refresh();
+        openModePicker();
         return;
-      } else if (cmd === "memory" || cmd === "mem") {
+            } else if (cmd === "memory" || cmd === "mem") {
         const g = renderGraph();
         push("", ...g.lines.map((l) => (l.startsWith("●") || l.startsWith("○") ? fg("36", l) : dim(l))), "");
         refresh();
@@ -731,62 +789,20 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         quit();
         return;
       }
+      if (overlayKeys) {
+        overlayKeys(data); // 弹层打开 → 按键全给它（含 esc 关闭，不会退回主页面）
+        tui.requestRender();
+        return;
+      }
       if (matchesKey(data, "escape")) {
-        if (picker) {
-          removePickerBlock(); // 有弹窗 → 只收弹窗（不退回主页面）
-          tui.requestRender();
-          return;
+        if (false) {
+          // 兼容占位（已由上方 overlayKeys 处理）
         }
         if (busy) {
           abort.abort(); // 中断当前生成（可继续输入）
         } else {
           quit();
         }
-        return;
-      }
-      if (picker) {
-        if (pickerKind === "mode") {
-          picker.handleInput(data);
-          return;
-        }
-        // 两次 d 删除：第一次武装，第二次删除并**自动跳到下一个会话**
-        if (data === "d" || data === "D") {
-          const sel = picker.getSelectedItem();
-          const id = sel?.value;
-          if (!id || !pickerBlock) return;
-          if (deleteArmed !== id) {
-            deleteArmed = id;
-            pickerBlock.note = `再按一次 d 删除「${String(sel?.label ?? id)}」（移入 .trash，可恢复）`;
-            tui.requestRender();
-            return;
-          }
-          deleteArmed = undefined;
-          const all = listBotSessions();
-          const curIdx = Math.max(0, all.findIndex((m) => m.id === id)); // 删除前索引
-          const r = trashSession(id);
-          if (!r.ok) {
-            pickerBlock.note = `删除失败：${r.error ?? "未知错误"}`;
-            tui.requestRender();
-            return;
-          }
-          if (id === sessionId) {
-            // 删的是当前会话：静默新开一个（继承模式）
-            sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
-            transcript.items = [];
-          }
-          openSessionsPicker(curIdx, `已删除 ${id}（移入 .trash，可恢复）· 可继续删`); // 同索引 = 下一个会话
-          return;
-        }
-        if (deleteArmed) {
-          deleteArmed = undefined;
-          if (pickerBlock) pickerBlock.note = "";
-          tui.requestRender();
-        }
-        if (deleteArmed) {
-          deleteArmed = undefined; // 其他键 → 取消武装
-          push(dim("  （已取消删除）"));
-        }
-        picker.handleInput(data);
         return;
       }
       editor.handleInput(data);
