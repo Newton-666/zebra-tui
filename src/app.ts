@@ -15,7 +15,7 @@ import {
 } from "../deps/pi-tui/dist/index.js";
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
-import { briefText, identityText } from "./kit.ts";
+import { briefText, ensureKit, identityText } from "./kit.ts";
 import { withModel } from "./models.ts";
 import { ModelPicker } from "./view/model-picker.ts";
 import { DEFAULT_COMMANDS } from "./types.ts";
@@ -338,6 +338,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       }
       m.role = text.slice(0, 400);
       saveTeamConfig(config);
+      ensureKit(config); // 同步刷新 BRIEF.md（成员可随时查阅）
       // 立即把新身份注给该成员（上下文里就此带上它的职责）
       const pane = paneIds[config.members.indexOf(m)];
       const ok = pane ? injectIdentity(m) : false;
