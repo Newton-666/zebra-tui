@@ -58,7 +58,13 @@ async function main() {
     }
     result = { action: "resume", id: hit.id };
   } else {
-    result = await runWizardFlow(opts.dir ?? process.cwd());
+    // 交互模式：bot 原型退出后回到首页（其余动作交给下方流程）
+    for (;;) {
+      result = await runWizardFlow(opts.dir ?? process.cwd());
+      if (result.action !== "bot") break;
+      const { runBotFlow } = await import("./view/bot-view.ts");
+      await runBotFlow(opts.dir ?? process.cwd());
+    }
   }
 
   if (result.action === "quit") {

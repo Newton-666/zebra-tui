@@ -30,6 +30,7 @@ const THEME = {
 export type WizardResult =
   | { action: "create"; config: TeamConfig }
   | { action: "resume"; id: string }
+  | { action: "bot" }
   | { action: "quit" };
 
 type Step =
@@ -222,6 +223,11 @@ class Wizard implements Component, Focusable {
         description: sessions.length ? `${sessions.length} 个历史团队，恢复对话与画面` : "暂无历史团队",
       },
       {
+        value: "bot",
+        label: "Krystal Bot",
+        description: builderCfg ? `和原生 agent 对话（原型）· ${builderCfg.model}` : "原生 agent（需先配置 Platform model）",
+      },
+      {
         value: "builder",
         label: "Platform model",
         description: builderCfg ? `已配置 · ${builderCfg.model}` : "未配置——一句话建队需要它",
@@ -233,6 +239,12 @@ class Wizard implements Component, Focusable {
       if (item.value === "new") this.showSize();
       else if (item.value === "gen") this.showGenInput();
       else if (item.value === "history") this.showChooser();
+      else if (item.value === "bot") {
+        if (!loadBuilder()) {
+          this.showMode();
+          this.error = "Krystal Bot 需要平台模型——先到 Platform model 配置";
+        } else this.onSubmitResult?.({ action: "bot" });
+      }
       else if (item.value === "builder") this.showBuilder();
       else this.onSubmitResult?.({ action: "quit" });
     });
