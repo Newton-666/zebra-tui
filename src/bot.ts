@@ -63,6 +63,24 @@ export function commandAllowed(cmd: string): boolean {
 
 const OUT_LIMIT = 4000;
 
+// ── 失败重试（网络抖动是常态：自然化处理，不是复杂化）
+// 总尝试 3 次（首发 + 2 次重试），每次间隔 10 秒；三次都拉不起来就停下来报错。
+// 只有「可重试」错误才重试：网络/超时/5xx/429；鉴权与参数类（400/401/403/404/422）立即停。
+const RETRY_MAX = 3;
+const RETRY_WAIT_MS = Number(process.env.KRYSTAL_RETRY_WAIT_MS ?? 10_000);
+export const isRetryable = (msg: string): boolean => {
+  if (/已中断|abort/i.test(msg)) return false;
+  if (/HTTP (400|401|403|404|422)\b/.test(msg)) return false;
+  return /fetch failed|连接失败|超时|timeout|timed out|terminated|ECONNRESET|ECONNREFUSED|socket|network|HTTP (5\d\d|429)/i.test(msg);
+};
+
+/** 可中断的等待（esc 能立刻打断重试等待） */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+
 export interface ToolResult {
   ok: boolean;
   denied?: boolean;
@@ -203,6 +221,7 @@ export async function streamChat(
 export type BotEvent =
   | { type: "thinking"; delta: string }
   | { type: "usage"; prompt: number; cached: number; completion: number }
+  | { type: "retry"; attempt: number; max: number; waitMs: number; reason: string }
   | { type: "assistant"; content: string; toolCalls: { id: string; name: string; args: string }[] }
   | { type: "tool_args"; name: string; argsSoFar: string }
   | { type: "text"; delta: string }
@@ -232,13 +251,40 @@ export async function runBotTask(opts: {
   const messages: unknown[] = [{ role: "system", content: SYSTEM(cwd, "阅读者") }, ...history];
   try {
     for (let turn = 0; turn < maxTurns; turn++) {
-      const { content, toolCalls } = await streamChat(cfg, messages, READER_TOOLS, {
-        signal,
-        onThinking: (d) => onEvent({ type: "thinking", delta: d }),
-        onText: (d) => onEvent({ type: "text", delta: d }),
-        onToolArgs: (name, argsSoFar) => onEvent({ type: "tool_args", name, argsSoFar }),
-        onUsage: (u) => onEvent({ type: "usage", ...u }),
-      });
+      // ── 重试：可重试错误等 10 秒再来，最多 3 次尝试
+      let content = "";
+      let toolCalls: Awaited<ReturnType<typeof streamChat>>["toolCalls"] = [];
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const r = await streamChat(cfg, messages, READER_TOOLS, {
+            signal,
+            onThinking: (d) => onEvent({ type: "thinking", delta: d }),
+            onText: (d) => onEvent({ type: "text", delta: d }),
+            onToolArgs: (name, argsSoFar) => onEvent({ type: "tool_args", name, argsSoFar }),
+            onUsage: (u) => onEvent({ type: "usage", ...u }),
+          });
+          content = r.content;
+          toolCalls = r.toolCalls;
+          break;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (signal?.aborted) {
+            onEvent({ type: "error", message: "已中断" });
+            return;
+          }
+          const canRetry = attempt < RETRY_MAX && isRetryable(msg);
+          if (!canRetry) {
+            onEvent({ type: "error", message: attempt > 1 ? `${msg}（已重试 ${attempt - 1} 次仍失败，停下）` : msg });
+            return;
+          }
+          onEvent({ type: "retry", attempt, max: RETRY_MAX, waitMs: RETRY_WAIT_MS, reason: msg });
+          await sleep(RETRY_WAIT_MS, signal);
+          if (signal?.aborted) {
+            onEvent({ type: "error", message: "已中断" });
+            return;
+          }
+        }
+      }
       if (!toolCalls.length) {
         onEvent({ type: "final", text: content });
         return;

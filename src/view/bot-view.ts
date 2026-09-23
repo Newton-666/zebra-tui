@@ -427,6 +427,18 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
         break;
       }
+      case "retry": {
+        closeStream();
+        state = `重试 ${e.attempt}/${e.max}`;
+        push(
+          dim(
+            `  ⟳ ${e.reason} —— ${Math.round(e.waitMs / 1000)} 秒后重试（第 ${e.attempt + 1}/${e.max} 次）`,
+          ),
+          "",
+        );
+        refresh();
+        break;
+      }
       case "assistant": {
         appendEvent(sessionId, {
           t: "msg",
