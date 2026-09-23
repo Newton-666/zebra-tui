@@ -16,7 +16,7 @@ import {
   type EditorTheme,
   type MarkdownTheme,
 } from "../../deps/pi-tui/dist/index.js";
-import { BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
+import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
@@ -86,7 +86,10 @@ class UserBlock implements Component {
 
 /** 工具调用块：与 pi 同源（tool-execution.js）——Box(padX=1, padY=1, toolXxxBg)
  *  状态色整页宽背景 + 加粗工具名 + dim 输出 + 截断提示；块内只用 bold/dim（\x1b[22m 还原）以免清掉底色 */
-const TOOL_BG: Record<string, string> = { pending: "48;5;236", ok: "48;5;22", denied: "48;5;52", error: "48;5;52" };
+// Krystal 色系（取自品牌渐变 51→45→39→33→27→26 与平台常量）：
+//   执行中 = 平台深蓝 BG_BLUE(48;5;24)｜成功 = 青蓝 48;5;30｜被闸门拦下 = 近黑深蓝 48;5;17
+const TOOL_BG: Record<string, string> = { pending: BG_BLUE, ok: "48;5;30", denied: "48;5;17", error: "48;5;17" };
+const TOOL_MARK: Record<string, string> = { pending: "38;5;45", ok: "38;5;51", denied: "38;5;231", error: "38;5;231" };
 const B_ON = "\x1b[1m";
 const B_OFF = "\x1b[22m";
 const D_ON = "\x1b[2m";
@@ -117,10 +120,11 @@ class ToolBlock implements Component {
     const inner = Math.max(12, w - 4);
     const bar = (body = "") => {
       const padTo = Math.max(0, inner - visibleWidth(body));
-      return chip(" " + body + " ".repeat(padTo) + ZWSP, TOOL_BG[this.state]!, "38;5;252");
+      return chip(" " + body + " ".repeat(padTo) + ZWSP, TOOL_BG[this.state]!, FG_WHITE);
     };
-    const mark = this.state === "pending" ? "●" : this.state === "ok" ? "✓" : "✗";
-    const head = `${mark} ${B_ON}${this.name}${B_OFF} ${D_ON}${this.args}${D_OFF}`;
+    const mark = this.state === "pending" ? "●" : this.state === "ok" ? "✓" : "✗ 闸门拒绝";
+    const markColored = `\x1b[${TOOL_MARK[this.state]!}m${mark}\x1b[39m`;
+    const head = `${markColored} ${B_ON}${this.name}${B_OFF} ${D_ON}${this.args}${D_OFF}`;
     const rows = [bar(), bar(head)];
     for (const l of this.output) rows.push(bar(D_ON + "  " + l + D_OFF));
     if (this.note) rows.push(bar(D_ON + "  " + this.note + D_OFF));
