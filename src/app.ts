@@ -193,13 +193,52 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 6 });
   editor.setAutocompleteProvider(new MentionProvider(config.members));
 
+  const COMMAND_HELP =
+    "命令: :model [成员] [模型] 换模型 · :to [成员] 锁定目标 · :brief [成员] 重发身份简报 · :team 重建引擎 · :help · :quit";
+  const COMMAND_HELP_FULL = [
+    "Krystal 命令（: 与 / 等价）",
+    "  :model                 查看各成员当前模型",
+    "  :model <成员>           查看该成员可选的模型来源",
+    "  :model <成员> <模型>     切换该成员模型（重启窗格并重注入身份）",
+    "  :to [成员|all]         锁定默认目标（不加 @ 时发给谁）",
+    "  :brief [成员]          重发身份与团队简报",
+    "  :team                  tmux 引擎丢失时重建",
+    "  :help                  本帮助      :quit  退出",
+    "提示：@成员 定向 · 行首 @ 弹窗选人 · 拖拽中间竖线调列宽 · 滚轮悬停某格滚它的历史",
+  ].join("\n");
+  const flashMsg = (msg: string) => {
+    const t = tui as unknown as { flash?: (m: string, d?: number) => void };
+    if (t.flash) t.flash(msg, 8000);
+    else {
+      lastAction = msg.split("\n")[0]!;
+      renderStatus();
+    }
+  };
   const handleSubmit = (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    editor.addToHistory(trimmed);
+    const raw = text.trim();
+    if (!raw) return;
+    editor.addToHistory(raw);
+    // `/xxx` 与 `:xxx` 等价（很多人习惯斜杠）；把 `/模型名` 这种误输入挡在广播之外
+    const trimmed = raw.startsWith("/") ? ":" + raw.slice(1) : raw;
+
+    if (trimmed.startsWith(":")) {
+      // 已知命令处理；未知命令只提示、绝不广播给成员
+      const word = trimmed.split(/\s+/)[0]!;
+      const known = [":quit", ":q", ":to", ":brief", ":model", ":team", ":help", ":h"];
+      if (!known.includes(word) && !known.some((k) => word.startsWith(k))) {
+        lastAction = `未知命令 ${word}（${COMMAND_HELP}）`;
+        renderStatus();
+        return;
+      }
+    }
 
     if (trimmed === ":quit" || trimmed === ":q") {
       void quit();
+      return;
+    }
+    if (trimmed === ":help" || trimmed === ":h") {
+      flashMsg(COMMAND_HELP_FULL);
+      renderStatus();
       return;
     }
     if (trimmed.startsWith(":to")) {
