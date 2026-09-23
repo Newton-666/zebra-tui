@@ -188,6 +188,7 @@ export async function streamChat(
 
 export type BotEvent =
   | { type: "thinking"; delta: string }
+  | { type: "tool_args"; name: string; argsSoFar: string }
   | { type: "text"; delta: string }
   | { type: "tool_start"; name: string; args: string }
   | { type: "tool_result"; name: string; ok: boolean; denied: boolean; output: string }
@@ -218,6 +219,7 @@ export async function runBotTask(opts: {
         signal,
         onThinking: (d) => onEvent({ type: "thinking", delta: d }),
         onText: (d) => onEvent({ type: "text", delta: d }),
+        onToolArgs: (name, argsSoFar) => onEvent({ type: "tool_args", name, argsSoFar }),
       });
       if (!toolCalls.length) {
         onEvent({ type: "final", text: content });

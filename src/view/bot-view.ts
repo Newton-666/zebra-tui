@@ -134,6 +134,28 @@ class ToolBlock implements Component {
   invalidate(): void {}
 }
 
+/** 流式文本块：多行折行渲染，原地增长（思考/回答共用）——pi 的思考是「一段」而不是一行 */
+class StreamText implements Component {
+  text = "";
+  private prefix: string;
+  private style: (s: string) => string;
+  private indent: string;
+  constructor(prefix: string, style: (s: string) => string, indent = "   ") {
+    this.prefix = prefix;
+    this.style = style;
+    this.indent = indent;
+  }
+  append(delta: string): void {
+    this.text += delta;
+  }
+  render(w: number): string[] {
+    const rows = wrapTextWithAnsi(this.text.replace(/\s+$/, ""), Math.max(8, w - 4));
+    if (!rows.length) rows.push("");
+    return rows.map((r, i) => (i === 0 ? " " + this.style(this.prefix) + this.style(r) : this.indent + this.style(r)));
+  }
+  invalidate(): void {}
+}
+
 export async function runBotFlow(cwd: string): Promise<void> {
   const cfg: BuilderConfig | undefined = loadBuilder();
   const terminal = new ProcessTerminal();
@@ -152,10 +174,6 @@ export async function runBotFlow(cwd: string): Promise<void> {
   let busy = false;
   let state = cfg ? "空闲" : "未配置";
   let tokens = 0;
-  let streamIdx = -1; // 正在流动的那一行
-  let streamKind: "thinking" | "text" | null = null;
-  let currentTool: ToolBlock | undefined;
-  let streamBuf = "";
   const abort = new AbortController();
   const history: { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[] = [];
 
@@ -200,21 +218,22 @@ export async function runBotFlow(cwd: string): Promise<void> {
     },
   };
 
-  // 流动行：同一行原地增长（thinking / 回答）
-  const beginStream = (prefix: string) => {
-    if (streamIdx >= 0) closeStream();
-    streamBuf = "";
-    push(prefix);
-    streamIdx = transcript.items.length - 1;
+  // 流动块：思考/回答各自一个多行组件，delta 原地增长
+  let streamItem: StreamText | undefined;
+  let streamKind: "thinking" | "text" | null = null;
+  let currentTool: ToolBlock | undefined;
+  const beginStream = (prefix: string, style: (s: string) => string) => {
+    if (streamKind) closeStream();
+    streamItem = new StreamText(prefix, style);
+    push(streamItem);
+    streamKind = prefix ? "thinking" : "text";
   };
-  const streamTo = (delta: string, build: (buf: string) => string) => {
-    streamBuf += delta;
-    if (streamIdx >= 0) transcript.items[streamIdx] = build(streamBuf);
+  const streamTo = (delta: string) => {
+    streamItem?.append(delta);
     tui.requestRender();
   };
   const closeStream = () => {
-    streamIdx = -1;
-    streamBuf = "";
+    streamItem = undefined;
     streamKind = null;
   };
   /** 分段之间留一空行（pi 的做法：思考/工具/回答 各自成段） */
@@ -227,28 +246,47 @@ export async function runBotFlow(cwd: string): Promise<void> {
     switch (e.type) {
       case "thinking":
         state = "思考中";
-        if (streamKind !== "thinking") beginStream(dim("· ")); // 显式类型：不再嗅探行内容
-        streamKind = "thinking";
+        if (streamKind !== "thinking") {
+          ensureGap();
+          beginStream("· thinking ", (t) => dim(t));
+        }
         tokens += e.delta.length / 4;
-        streamTo(e.delta, (b) => dim("· thinking " + b.replace(/\s+/g, " ")));
+        streamTo(e.delta);
         break;
       case "text":
         state = "回答中";
         if (streamKind !== "text") {
-          ensureGap(); // 与上面的思考/工具留出距离
-          beginStream("");
+          ensureGap();
+          beginStream("", (t) => t);
         }
-        streamKind = "text";
         tokens += e.delta.length / 4;
-        streamTo(e.delta, (b) => " " + b);
+        streamTo(e.delta);
         break;
-      case "tool_start": {
-        closeStream();
+      case "tool_args": {
+        // 工具参数流式显示：块在参数生成时就出现（不再等生成完才有动静）
         state = "工具 " + e.name;
-        ensureGap();
-        tokens += e.args.length / 4;
-        currentTool = new ToolBlock(e.name, e.args);
-        push(currentTool);
+        if (!currentTool) {
+          closeStream();
+          ensureGap();
+          currentTool = new ToolBlock(e.name, e.argsSoFar);
+          push(currentTool);
+        } else {
+          currentTool.args = new ToolBlock(e.name, e.argsSoFar).args;
+        }
+        tokens += e.argsSoFar.length / 40;
+        tui.requestRender();
+        break;
+      }
+      case "tool_start": {
+        state = "工具 " + e.name;
+        if (!currentTool) {
+          closeStream();
+          ensureGap();
+          currentTool = new ToolBlock(e.name, e.args);
+          push(currentTool);
+        } else {
+          currentTool.args = new ToolBlock(e.name, e.args).args;
+        }
         break;
       }
       case "tool_result": {
@@ -259,11 +297,12 @@ export async function runBotFlow(cwd: string): Promise<void> {
       }
       case "final": {
         // 流式原始行 → Markdown 渲染块（与 pi 的回答观感一致）
-        const at = streamIdx;
+        const streamed = streamItem; // 先留引用：closeStream 会清空
         closeStream();
         state = "完成";
         if (e.text.trim()) {
-          if (at >= 0) transcript.items.splice(at, 1);
+          const idx = streamed ? transcript.items.indexOf(streamed) : -1;
+          if (idx >= 0) transcript.items.splice(idx, 1);
           push(new Markdown(e.text, 1, 0, BOT_THEME));
           push("");
         }
