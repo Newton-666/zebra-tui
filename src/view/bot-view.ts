@@ -84,6 +84,52 @@ class UserBlock implements Component {
   invalidate(): void {}
 }
 
+/** 工具调用块：与 pi 同源（tool-execution.js）——Box(padX=1, padY=1, toolXxxBg)
+ *  状态色整页宽背景 + 加粗工具名 + dim 输出 + 截断提示；块内只用 bold/dim（\x1b[22m 还原）以免清掉底色 */
+const TOOL_BG: Record<string, string> = { pending: "48;5;236", ok: "48;5;22", denied: "48;5;52", error: "48;5;52" };
+const B_ON = "\x1b[1m";
+const B_OFF = "\x1b[22m";
+const D_ON = "\x1b[2m";
+const D_OFF = "\x1b[22m";
+class ToolBlock implements Component {
+  name: string;
+  args: string;
+  private state = "pending";
+  private output: string[] = [];
+  private note = "";
+  constructor(name: string, args: string) {
+    this.name = name;
+    let preview = args;
+    try {
+      preview = JSON.stringify(JSON.parse(args));
+    } catch {
+      /* 原样 */
+    }
+    this.args = preview.slice(0, 90);
+  }
+  setResult(ok: boolean, denied: boolean, output: string): void {
+    this.state = denied ? "denied" : ok ? "ok" : "error";
+    const lines = output.split("\n").filter((l) => l.trim() !== "");
+    this.output = lines.slice(0, 6).map((l) => l.slice(0, 160));
+    this.note = lines.length > 6 ? `… +${lines.length - 6} 行` : "";
+  }
+  render(w: number): string[] {
+    const inner = Math.max(12, w - 4);
+    const bar = (body = "") => {
+      const padTo = Math.max(0, inner - visibleWidth(body));
+      return chip(" " + body + " ".repeat(padTo) + ZWSP, TOOL_BG[this.state]!, "38;5;252");
+    };
+    const mark = this.state === "pending" ? "●" : this.state === "ok" ? "✓" : "✗";
+    const head = `${mark} ${B_ON}${this.name}${B_OFF} ${D_ON}${this.args}${D_OFF}`;
+    const rows = [bar(), bar(head)];
+    for (const l of this.output) rows.push(bar(D_ON + "  " + l + D_OFF));
+    if (this.note) rows.push(bar(D_ON + "  " + this.note + D_OFF));
+    rows.push(bar());
+    return rows;
+  }
+  invalidate(): void {}
+}
+
 export async function runBotFlow(cwd: string): Promise<void> {
   const cfg: BuilderConfig | undefined = loadBuilder();
   const terminal = new ProcessTerminal();
@@ -104,6 +150,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
   let tokens = 0;
   let streamIdx = -1; // 正在流动的那一行
   let streamKind: "thinking" | "text" | null = null;
+  let currentTool: ToolBlock | undefined;
   let streamBuf = "";
   const abort = new AbortController();
   const history: { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[] = [];
@@ -196,19 +243,14 @@ export async function runBotFlow(cwd: string): Promise<void> {
         state = "工具 " + e.name;
         ensureGap();
         tokens += e.args.length / 4;
-        let argsPreview = e.args;
-        try {
-          argsPreview = JSON.stringify(JSON.parse(e.args));
-        } catch {
-          /* 原样 */
-        }
-        push(` ${fg("33", "▸")} ${fg("33", e.name)} ${dim(argsPreview.slice(0, 120))}`);
+        currentTool = new ToolBlock(e.name, e.args);
+        push(currentTool);
         break;
       }
       case "tool_result": {
-        const mark = e.denied ? fg("31", "✗ 闸门") : e.ok ? fg("32", "✓") : fg("31", "✗");
-        const first = e.output.split("\n").slice(0, 4).join(" ⏎ ");
-        push(`   ${mark} ${dim(first.slice(0, 200))}`);
+        currentTool?.setResult(e.ok, e.denied, e.output);
+        currentTool = undefined;
+        tui.requestRender();
         break;
       }
       case "final": {
