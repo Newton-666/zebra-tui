@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, summarize, withSystem } from "./context.ts";
+import { decide, modeLabel, type Mode } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
 import { about, addFact, adjustTrust, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts, supersedeFact } from "./memory.ts";
 
@@ -61,7 +62,8 @@ export const READER_TOOLS: BotTool[] = [
   },
   {
     name: "run_command",
-    description: "跑一条只读命令（白名单：pwd/ls/cat/head/tail/grep/rg/find/wc/which/git status/log/diff/show/branch）",
+    description:
+      "跑一条终端命令。只读模式：仅白名单（pwd/ls/cat/head/tail/grep/rg/find/wc/which/git status/log/diff/show/branch）。完全访问模式：白名单直通 + 灰名单（mkdir/touch/cp/mv/sed/构建测试/git add·commit 等）放行；删除类、覆盖已存在文件、提权、磁盘/系统级命令始终被黑名单拦截",
     parameters: {
       type: "object",
       properties: { command: { type: "string", description: "命令行" } },
@@ -110,7 +112,7 @@ export interface ToolResult {
   output: string;
 }
 
-export async function executeTool(name: string, rawArgs: string, cwd: string): Promise<ToolResult> {
+export async function executeTool(name: string, rawArgs: string, cwd: string, mode: Mode = "readonly"): Promise<ToolResult> {
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(rawArgs || "{}") as Record<string, unknown>;
@@ -186,7 +188,8 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
     }
     if (name === "run_command") {
       const cmd = String(args.command ?? "");
-      if (!commandAllowed(cmd)) return { ok: false, denied: true, output: `策略闸门拒绝（档位：阅读者，白名单外）：${cmd.slice(0, 80)}` };
+      const d = decide(cmd, mode, cwd);
+      if (!d.allow) return { ok: false, denied: true, output: `策略闸门拒绝［${d.list}］${d.reason ?? ""}：${cmd.slice(0, 80)}` };
       const r = await execAsync(cmd, { cwd, timeout: 15_000, maxBuffer: 1024 * 1024 });
       const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
       return { ok: true, output: out.slice(0, OUT_LIMIT) + (out.length > OUT_LIMIT ? "…（截断）" : "") || "（无输出）" };
@@ -313,12 +316,14 @@ export type BotEvent =
   | { type: "final"; text: string }
   | { type: "error"; message: string };
 
-const SYSTEM = (cwd: string, tier: string) => `你是 Krystal Bot——Krystal 平台的原生成员。
+const SYSTEM = (cwd: string, tier: string, mode: Mode = "readonly") => `你是 Krystal Bot——Krystal 平台的原生成员。
 工作目录：${cwd}
 当前档位：${tier}
 规则：
 - 调工具前先用一句话说明意图；工具输出会由系统回填给你
-- ${tier === "阅读者" ? "你是只读档位：只能查看，任何写操作都会被策略闸门拒绝——不要尝试" : "按档位白名单行事"}
+- 当前终端模式：${modeLabel(mode)}${mode === "readonly"
+  ? "（只读）：只能查看，写类命令会被闸门拒绝——不要尝试"
+  : "：白名单直通；灰名单（建/改文件、git add/commit 等）放行，但**删除类与覆盖已存在文件会被黑名单拦截**；要删东西请让人来做"}
 - 回答精炼，用中文；先给结论，再给依据（文件:行号）
 - 不使用 emoji（平台审美：纯文字/几何符号）`;
 
@@ -326,14 +331,15 @@ export async function runBotTask(opts: {
   cfg: BuilderConfig;
   cwd: string;
   events: SessionEvent[];
+  mode?: Mode;
   signal?: AbortSignal;
   onEvent: (e: BotEvent) => void;
   maxTurns?: number;
 }): Promise<void> {
-  const { cfg, cwd, events, signal, onEvent, maxTurns = 8 } = opts;
+  const { cfg, cwd, events, signal, onEvent, maxTurns = 8, mode = "readonly" } = opts;
   // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
   const mem = memoryBlock();
-  const system = SYSTEM(cwd, "阅读者") + (mem ? `\n\n${mem}` : "");
+  const system = SYSTEM(cwd, "阅读者", mode) + (mem ? `\n\n${mem}` : "");
   const win = contextWindow(cfg.model);
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));
   const summarizeAt = Number(process.env.KRYSTAL_CONTEXT_SUMMARIZE_AT ?? Math.round(win * 0.85));
@@ -399,7 +405,7 @@ export async function runBotTask(opts: {
       messages.push({ role: "assistant", content: content || null, tool_calls: toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: t.args } })) });
       for (const t of toolCalls) {
         onEvent({ type: "tool_start", id: t.id, name: t.name, args: t.args });
-        const r = await executeTool(t.name, t.args, cwd);
+        const r = await executeTool(t.name, t.args, cwd, mode);
         onEvent({ type: "tool_result", id: t.id, name: t.name, ok: r.ok, denied: !!r.denied, output: r.output });
         messages.push({ role: "tool", tool_call_id: t.id, content: (r.denied ? "[策略闸门拒绝] " : "") + r.output });
       }

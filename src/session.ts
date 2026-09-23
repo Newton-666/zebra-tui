@@ -10,6 +10,8 @@ export interface BotMeta {
   kind: "bot";
   /** 会话名（/name 设置；用于历史列表与状态行） */
   name?: string;
+  /** 终端模式（/mode 弹窗设置）：只读 / 完全访问 */
+  mode?: "readonly" | "full";
   cwd: string;
   model: string;
   tier: string;
@@ -94,6 +96,20 @@ export function renameSession(id: string, name: string): BotMeta | undefined {
   const m = loadBotMeta(id);
   if (!m) return undefined;
   m.name = name.trim().slice(0, 40) || undefined;
+  m.updatedAt = new Date().toISOString();
+  try {
+    fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);
+  } catch {
+    return undefined;
+  }
+  return m;
+}
+
+/** /mode 弹窗：设置终端模式（只读 / 完全访问） */
+export function setSessionMode(id: string, mode: "readonly" | "full"): BotMeta | undefined {
+  const m = loadBotMeta(id);
+  if (!m) return undefined;
+  m.mode = mode;
   m.updatedAt = new Date().toISOString();
   try {
     fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);

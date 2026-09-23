@@ -33,9 +33,11 @@ import {
   listBotSessions,
   messagesFrom,
   renameSession,
+  setSessionMode,
   touchSession,
   trashSession,
 } from "../session.ts";
+import { modeLabel, type Mode } from "../gate.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
@@ -216,6 +218,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let usage = resumed ? lastUsage(loadEvents(sessionId)) : undefined;
   let sessionName: string | undefined = resumed ? loadBotMeta(sessionId)?.name : undefined; // /name 设置
   let picker: SelectList | undefined;
+  let pickerKind: "sessions" | "mode" | undefined;
+  let mode: Mode = resumed?.mode ?? loadBotMeta(sessionId)?.mode ?? "readonly";
   let deleteArmed: string | undefined; // 两次 d 删除：第一次只武装并提示
   let foldCount = 0; // 本回合折叠的工具输出条数（上下文回收的可见性）
   let summaryActive = resumed ? !!lastSummary(loadEvents(sessionId)) : false;
@@ -328,6 +332,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       tui.requestRender();
     };
     picker = list;
+    pickerKind = "sessions";
+    deleteArmed = undefined;
     push("", dim("  回溯历史（↑↓ 选择 · enter 恢复 · esc 取消 · d 删除）"), list);
     refresh();
   };
@@ -365,7 +371,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const sid = sessionName ? `${sessionName}` : sessionId.replace(/^bot-/, "").slice(0, 15);
       const extra = `${foldCount ? `折叠 ${foldCount} · ` : ""}${summaryActive ? "摘要 有 · " : ""}`;
       const ctxText = cs.level === "ok" ? dim(cs.label) : cs.level === "fold" ? fg(BLUE_LIGHT, cs.label) : bold(fg(BLUE_LIGHT, `${cs.label} ▲`));
-      const seg = `${sid} · ${busy ? state : "空闲"} · ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
+      const seg = `${sid} · ${busy ? state : "空闲"} · ${modeLabel(mode)} · ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
       return [truncateToWidth(` ${seg} ${dim("· esc 中断 · ctrl+c 退出")}`, w)];
     },
     invalidate(): void {},
@@ -553,7 +559,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     // 每回合从事件流装配上下文：只追加、顺序稳定 → 前缀缓存友好（§13.2）
     const events = loadEvents(sessionId);
     checkPrefix(events.filter((e) => e.t === "msg"));
-    void runBotTask({ cfg, cwd, events, signal: abort.signal, onEvent });
+    void runBotTask({ cfg, cwd, events, mode, signal: abort.signal, onEvent });
   };
 
   editor.onSubmit = (text: string) => {
@@ -565,6 +571,32 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const cmd = body.slice(1).trim().toLowerCase();
       clearEditor();
       if (cmd === "resume" || cmd === "sessions") openPicker();
+      else if (cmd === "mode") {
+        const items = [
+          { value: "readonly", label: "Read Only（只读）", description: "白名单通过；写类命令被拦。最安全，适合看代码 / 调研" },
+          { value: "full", label: "Full access（完全访问）", description: "白名单直通；灰名单（建/改文件、git add·commit、构建测试）放行；删除类与覆盖已存在文件被黑名单拦截" },
+          { value: "__cancel", label: "取消", description: `当前：${modeLabel(mode)}` },
+        ];
+        const list = new SelectList(items, items.length, THEME);
+        list.onSelect = (it: { value: string }) => {
+          picker = undefined;
+          if (it.value !== "__cancel") {
+            mode = it.value as Mode;
+            setSessionMode(sessionId, mode);
+            push(dim(`  终端模式已切换：${modeLabel(mode)}（下一次对话生效）`), "");
+          }
+          tui.requestRender();
+        };
+        list.onCancel = () => {
+          picker = undefined;
+          tui.requestRender();
+        };
+        picker = list;
+        pickerKind = "mode";
+        push("", dim("  终端模式（↑↓ 选择 · enter 确认 · esc 取消）"), list);
+        refresh();
+        return;
+      }
       else if (cmd === "new") {
         sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者" }).id;
         transcript.items = [...pushIntro(cfg.model, cwd), ""];
@@ -593,7 +625,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
       } else if (cmd === "help") {
         push(
-          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /memory 记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"),
+          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /mode 终端模式 · /memory 记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"),
           "",
         );
         refresh();
@@ -635,6 +667,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         return;
       }
       if (picker) {
+        if (pickerKind === "mode") {
+          picker.handleInput(data);
+          return;
+        }
         // 两次 d 删除：第一次武装并提示，第二次才真正移入 .trash（可恢复）
         if (data === "d" || data === "D") {
           const sel = picker.getSelectedItem();
