@@ -92,47 +92,57 @@ const TAGLINE = "棱镜之间，诸神显形";
  *   否则                            → 横幅（名字 + 标语）+ 会话卡
  */
 export function renderPortrait(width: number, height: number, info: PortraitInfo): string[] {
-  const out: string[] = [];
   const wOf = (rows: string[]) => Math.max(...rows.map((r) => [...r].length));
   const logoW = wOf(LOGO_ROWS);
   const fullW = wOf(ROSE_ART);
   const smallW = wOf(ROSE_ART_SMALL);
-  const CARD = 6; // 空行 + 5 行卡片
+  const GAP = 4;
+  const RIGHT_MIN = 42; // 右侧介绍列最小宽度（够放信息卡）
 
   if (width < 34) return [` ${bold(info.name)} ${dim("· 原生成员")}`];
 
-  const logo = (): string[] => LOGO_ROWS.map((r, i) => fg(KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!, r));
+  // 右侧介绍列（名字 / 标语 / 会话信息卡）
+  const rightCol = (rw: number): string[] => [
+    bold(info.name),
+    fg(BLUE_LIGHT, TAGLINE),
+    "",
+    ...sessionCard(rw, info),
+  ];
 
-  // 宽到能并排（logo 左 / 画像 右）→ 最气派的排法；否则上下排
-  const sideBySide = width >= logoW + smallW + 6;
-  if (sideBySide) {
-    const art = ROSE_ART_SMALL;
-    const rows: string[] = [];
-    const lg = logo();
-    for (let i = 0; i < Math.max(lg.length, art.length); i++) {
-      const left = (lg[i] ?? "").padEnd(logoW);
-      const right = art[i] ? fg(rowColor(i), art[i]!) : "";
-      rows.push(left + "  " + right);
+  const logo = LOGO_ROWS.map((r, i) => fg(KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!, r));
+  const out: string[] = [...logo];
+
+  // 在「宽」允许时优先并排：玫瑰在左、介绍在右（放得下完整画像就用完整）
+  const useFull = width >= fullW + GAP + RIGHT_MIN;
+  const useSmall = width >= smallW + GAP + RIGHT_MIN;
+  if (useFull || useSmall) {
+    const art = useFull ? ROSE_ART : ROSE_ART_SMALL;
+    const artW = wOf(art);
+    const right = rightCol(width - artW - GAP);
+    out.push("");
+    for (let i = 0; i < Math.max(art.length, right.length); i++) {
+      const left = art[i] ? fg(rowColor(i), art[i]!.padEnd(artW)) : " ".repeat(artW);
+      out.push(`${left}${" ".repeat(GAP)}${right[i] ?? ""}`);
     }
-    out.push(...rows, "", bold(info.name) + "  " + fg(BLUE_LIGHT, TAGLINE), "");
-    out.push(...sessionCard(width, info));
     return out;
   }
 
-  // 上下排：logo 在上；按剩余高度选画像档位
-  const fitsFull = width >= fullW + 2 && height >= LOGO_ROWS.length + ROSE_ART.length + CARD;
-  const fitsSmall = width >= smallW + 2 && height >= LOGO_ROWS.length + ROSE_ART_SMALL.length + CARD;
-  out.push(...logo());
+  // 窄屏：玫瑰整幅在下、介绍再往下（放得下完整画像就用完整）
+  const fitsFull = width >= fullW && height >= LOGO_ROWS.length + ROSE_ART.length + 7;
+  const fitsSmall = width >= smallW && height >= LOGO_ROWS.length + ROSE_ART_SMALL.length + 7;
   if (fitsFull || fitsSmall) {
     const art = fitsFull ? ROSE_ART : ROSE_ART_SMALL;
     out.push("");
     for (let i = 0; i < art.length; i++) out.push(fg(rowColor(i), art[i]!));
-  } else {
-    const inner = Math.max(10, width - 4);
-    out.push(dim("╭" + "─".repeat(inner) + "╮"));
-    out.push(`${dim("│")} ${bold(fg(BLUE_LIGHT, info.name))} ${dim(`· ${TAGLINE}`)}`.padEnd(inner + 2) + dim("│"));
-    out.push(dim("╰" + "─".repeat(inner) + "╯"));
+    out.push("");
+    out.push(...rightCol(width));
+    return out;
   }
+
+  const inner = Math.max(10, width - 4);
+  out.push(dim("╭" + "─".repeat(inner) + "╮"));
+  out.push(`${dim("│")} ${bold(fg(BLUE_LIGHT, info.name))} ${dim(`· ${TAGLINE}`)}`.padEnd(inner + 2) + dim("│"));
+  out.push(dim("╰" + "─".repeat(inner) + "╯"));
   out.push("");
   out.push(...sessionCard(width, info));
   return out;
