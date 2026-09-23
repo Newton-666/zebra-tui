@@ -4,7 +4,7 @@
 // 来源：owner 提供的 Rose.png，程序化点阵转换（块均值 + Floyd–Steinberg 抖动 + 裁剪）。
 // 生成脚本见 docs（块均值降采样 → 背景减法 → 抖动 → Braille 码位）。
 import { BLUE_LIGHT, bold, chip, dim, fg } from "./ansi.ts";
-import { KRYSTAL_GRADIENT } from "./logo.ts";
+import { KRYSTAL_GRADIENT, LOGO_ROWS } from "./logo.ts";
 
 /** 完整画像（72×37，点阵 144×148） */
 export const ROSE_ART: string[] = [
@@ -82,7 +82,7 @@ export interface PortraitInfo {
 
 /** 逐行渐变（与 logo 同源：51→45→39→33→27→26，循环铺满行数） */
 const rowColor = (i: number) => KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!;
-const TAGLINE = "Krystal · 棱镜之间，诸神显形";
+const TAGLINE = "棱镜之间，诸神显形";
 
 /**
  * 开场画像（响应式分层，照 pi/hermes 的思路）：
@@ -94,32 +94,44 @@ const TAGLINE = "Krystal · 棱镜之间，诸神显形";
 export function renderPortrait(width: number, height: number, info: PortraitInfo): string[] {
   const out: string[] = [];
   const wOf = (rows: string[]) => Math.max(...rows.map((r) => [...r].length));
-  const full = ROSE_ART;
-  const small = ROSE_ART_SMALL;
+  const logoW = wOf(LOGO_ROWS);
+  const fullW = wOf(ROSE_ART);
+  const smallW = wOf(ROSE_ART_SMALL);
+  const CARD = 6; // 空行 + 5 行卡片
 
   if (width < 34) return [` ${bold(info.name)} ${dim("· 原生成员")}`];
 
-  // 画像是「滚动内容」——只要宽度放得下、高度容得下整幅即可（信息卡可滚动再看到）
-  const fitsFull = width >= wOf(full) + 2 && height >= full.length + 1;
-  const fitsSmall = width >= wOf(small) + 2 && height >= small.length + 1;
-  if (!fitsFull && !fitsSmall) {
+  const logo = (): string[] => LOGO_ROWS.map((r, i) => fg(KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!, r));
+
+  // 宽到能并排（logo 左 / 画像 右）→ 最气派的排法；否则上下排
+  const sideBySide = width >= logoW + smallW + 6;
+  if (sideBySide) {
+    const art = ROSE_ART_SMALL;
+    const rows: string[] = [];
+    const lg = logo();
+    for (let i = 0; i < Math.max(lg.length, art.length); i++) {
+      const left = (lg[i] ?? "").padEnd(logoW);
+      const right = art[i] ? fg(rowColor(i), art[i]!) : "";
+      rows.push(left + "  " + right);
+    }
+    out.push(...rows, "", bold(info.name) + "  " + fg(BLUE_LIGHT, TAGLINE), "");
+    out.push(...sessionCard(width, info));
+    return out;
+  }
+
+  // 上下排：logo 在上；按剩余高度选画像档位
+  const fitsFull = width >= fullW + 2 && height >= LOGO_ROWS.length + ROSE_ART.length + CARD;
+  const fitsSmall = width >= smallW + 2 && height >= LOGO_ROWS.length + ROSE_ART_SMALL.length + CARD;
+  out.push(...logo());
+  if (fitsFull || fitsSmall) {
+    const art = fitsFull ? ROSE_ART : ROSE_ART_SMALL;
+    out.push("");
+    for (let i = 0; i < art.length; i++) out.push(fg(rowColor(i), art[i]!));
+  } else {
     const inner = Math.max(10, width - 4);
     out.push(dim("╭" + "─".repeat(inner) + "╮"));
     out.push(`${dim("│")} ${bold(fg(BLUE_LIGHT, info.name))} ${dim(`· ${TAGLINE}`)}`.padEnd(inner + 2) + dim("│"));
     out.push(dim("╰" + "─".repeat(inner) + "╯"));
-    out.push(...sessionCard(width, info));
-    return out;
-  }
-  const art = fitsFull ? full : small;
-  const side = width >= wOf(art) + 34; // 宽屏：画像右列放名字/标语/前几行卡片
-  for (let i = 0; i < art.length; i++) {
-    const painted = fg(rowColor(i), art[i]!);
-    if (!side) {
-      out.push(painted);
-      continue;
-    }
-    const right = i === 0 ? bold(info.name) : i === 1 ? fg(BLUE_LIGHT, TAGLINE) : "";
-    out.push(painted + "  " + right);
   }
   out.push("");
   out.push(...sessionCard(width, info));
