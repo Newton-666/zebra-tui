@@ -16,7 +16,8 @@ import {
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
 import { briefText, identityText } from "./kit.ts";
-import { discoverModelGroups, withModel } from "./models.ts";
+import { withModel } from "./models.ts";
+import { ModelPicker } from "./view/model-picker.ts";
 import { DEFAULT_COMMANDS } from "./types.ts";
 import { ScreenPoller } from "./poll.ts";
 import { AgentCell } from "./view/cell.ts";
@@ -193,6 +194,47 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 6 });
   editor.setAutocompleteProvider(new MentionProvider(config.members));
 
+  /** 切换某成员模型：重写启动/恢复命令 + 重启窗格 + 重新注入身份 */
+  const switchModel = (m: Member, model: string) => {
+    const base = m.type === "custom" ? m.command : DEFAULT_COMMANDS[m.type]!.command;
+    const baseResume =
+      m.type === "custom"
+        ? m.resumeCommand ?? m.command
+        : DEFAULT_COMMANDS[m.type]!.resume ?? DEFAULT_COMMANDS[m.type]!.command;
+    const next = model || undefined;
+    m.model = next;
+    m.command = withModel(base, m.type, next);
+    m.resumeCommand = withModel(baseResume, m.type, next);
+    saveTeamConfig(config);
+    const pane = paneIds[config.members.indexOf(m)];
+    if (pane) {
+      try {
+        respawnPane(config, m, pane);
+        pendingIdentity.add(m.id); // 重启后上下文是新的 → 重新注入身份
+        lastAction = `${m.name} 模型 → ${next ?? "默认"}（窗格重启中，身份将重新注入）`;
+      } catch (e) {
+        lastAction = `切换失败: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    } else {
+      lastAction = `${m.name} 模型 → ${next ?? "默认"}（下次启动生效）`;
+    }
+    renderStatus();
+  };
+
+  /** 打开模型选择弹窗（成员 → 来源 → 模型） */
+  const openModelPicker = (memberName?: string) => {
+    const picker = new ModelPicker(config.members, memberName);
+    let handle: { hide: () => void } | undefined;
+    picker.onPick = (m, model) => {
+      handle?.hide();
+      switchModel(m, model);
+    };
+    picker.onCancel = () => handle?.hide();
+    handle = tui.showOverlay(picker, { width: 68, maxHeight: "80%", anchor: "center", margin: 2 });
+    lastAction = "模型选择：↑↓ 选择 · enter 确认 · esc 取消";
+    renderStatus();
+  };
+
   const COMMAND_HELP =
     "命令: :model [成员] [模型] 换模型 · :to [成员] 锁定目标 · :brief [成员] 重发身份简报 · :team 重建引擎 · :help · :quit";
   const COMMAND_HELP_FULL = [
@@ -277,9 +319,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       const [, memberArg, ...rest] = trimmed.split(/\s+/);
       const modelArg = rest.join(" ").trim();
       if (!memberArg) {
-        const cur = config.members.map((m) => `${m.name}:${m.model ?? "默认"}`).join(" · ");
-        lastAction = truncateToWidth(cur, 70, "…");
-        renderStatus();
+        openModelPicker();
         return;
       }
       const m = config.members.find((x) => x.name === memberArg || x.id === memberArg);
@@ -289,34 +329,10 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         return;
       }
       if (!modelArg) {
-        const groups = discoverModelGroups(m.type);
-        const sample = groups.slice(0, 2).map((g) => `${g.group}(${g.models.length})`).join(" ");
-        lastAction = `${m.name} 当前模型: ${m.model ?? "默认"} · 来源: ${sample} · 用法 :model ${m.name} <模型>`;
-        renderStatus();
+        openModelPicker(m.name); // 弹窗：直接进入该成员的模型来源
         return;
       }
-      // 切换：用该类型的基准命令重新拼接模型（custom 保留原命令，可含 {} 占位）
-      const base = m.type === "custom" ? m.command : DEFAULT_COMMANDS[m.type]!.command;
-      const baseResume =
-        m.type === "custom" ? m.resumeCommand ?? m.command : DEFAULT_COMMANDS[m.type]!.resume ?? DEFAULT_COMMANDS[m.type]!.command;
-      m.model = modelArg;
-      m.command = withModel(base, m.type, modelArg);
-      m.resumeCommand = withModel(baseResume, m.type, modelArg);
-      saveTeamConfig(config);
-      const idx = config.members.indexOf(m);
-      const pane = paneIds[idx];
-      if (pane) {
-        try {
-          respawnPane(config, m, pane);
-          pendingIdentity.add(m.id); // 上下文重来 → 重新注入身份
-          lastAction = `${m.name} 模型已切到 ${modelArg}（窗格重启中，身份将重新注入）`;
-        } catch (e) {
-          lastAction = `切换失败: ${e instanceof Error ? e.message : String(e)}`;
-        }
-      } else {
-        lastAction = `${m.name} 模型已切到 ${modelArg}（下次启动生效）`;
-      }
-      renderStatus();
+      switchModel(m, modelArg);
       return;
     }
     if (trimmed === ":team") {
