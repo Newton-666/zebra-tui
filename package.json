@@ -10,8 +10,5 @@
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
     "smoke": "KRISTAL_SESSIONS_DIR=/tmp/krystal-test-sessions node --experimental-strip-types --no-warnings scripts/smoke.ts"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "^0.87.1"
   }
 }
