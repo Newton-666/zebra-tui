@@ -23,6 +23,7 @@ export interface TeamConfig {
   paneIds?: Record<string, string>; // memberId -> tmux pane id (persisted)
   gridRatios?: number[];            // 列宽比例（可拖拽分隔线调整）
   briefed?: string[];               // 已注入团队简报的成员 id
+  layoutVersion?: number;           // 引擎排布规则版本（不匹配则重建）
   goal?: string;                    // 团队目标（一句话建队生成 / 手动填写）
   protocol?: string[];              // 协作协议（预置到白板，免去成员互相谈判）
 }
@@ -52,3 +53,6 @@ export const MEMBER_COLORS: Record<string, string> = {
 
 /** 网格列数：1 人单列；3 人三列（各占满高，避免 2+1 畸形）；其余两列 */
 export const columnCount = (n: number): number => (n <= 1 ? 1 : n === 3 ? 3 : 2);
+
+/** 引擎窗格排布规则版本：与网格列规则绑定；不一致时 resume 会重建引擎以对齐 */
+export const LAYOUT_VERSION = 2;

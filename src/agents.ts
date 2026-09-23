@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { saveTeamConfig, sessionDir } from "./team.ts";
 import { ensureKit } from "./kit.ts";
-import { columnCount, type Member, type TeamConfig } from "./types.ts";
+import { columnCount, LAYOUT_VERSION, type Member, type TeamConfig } from "./types.ts";
 
 /** 成员窗格的环境：身份 + 会话工具包 PATH（`zebra roster/send/board` 可用） */
 function envArgs(config: TeamConfig, member: Member): string[] {
@@ -109,6 +109,7 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
     }
   });
   // 持久化 member→pane 映射（resume 时顺序稳定）
+  config.layoutVersion = LAYOUT_VERSION;
   config.paneIds = {};
   config.members.forEach((m, i) => {
     config.paneIds![m.id] = paneIds[i]!;
@@ -120,6 +121,10 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
 /** Ensure session exists with ALL member panes alive; rebuild if incomplete. Returns pane ids in member order. */
 export function ensureTeamSession(config: TeamConfig, useResume: boolean): string[] {
   const name = config.tmuxSession;
+  // 排布规则升级 → 引擎窗格与网格不再对齐，重建一次（成员用各自的 resume 命令，上下文由 agent 自身持久化）
+  if (config.layoutVersion !== LAYOUT_VERSION && sessionAlive(name)) {
+    killSession(name);
+  }
   if (sessionAlive(name)) {
     // 1) 持久化映射且全部存活 → 直接用
     if (config.paneIds) {
