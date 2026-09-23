@@ -204,6 +204,12 @@ export function identityText(config: TeamConfig, memberId: string): string {
   return who + job + mate + tools;
 }
 
+/** 职责后续修改时的精简更新（避免同一身份在成员上下文里重复出现两份） */
+export function identityUpdateText(config: TeamConfig, memberId: string): string {
+  const me = config.members.find((m) => m.id === memberId)!;
+  return `[身份更新] 你的职责改为：${me.role ?? "（无）"}。以此为准，之前那条身份里的职责作废；队友与协作方式不变。`;
+}
+
 export function briefText(config: TeamConfig, memberId: string): string {
   const me = config.members.find((m) => m.id === memberId)!;
   const others = config.members.filter((m) => m.id !== memberId).map((m) => `${m.name}(${m.type})`);

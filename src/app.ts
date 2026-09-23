@@ -15,7 +15,7 @@ import {
 } from "../deps/pi-tui/dist/index.js";
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
-import { briefText, ensureKit, identityText } from "./kit.ts";
+import { briefText, ensureKit, identityText, identityUpdateText } from "./kit.ts";
 import { withModel } from "./models.ts";
 import { ModelPicker } from "./view/model-picker.ts";
 import { DEFAULT_COMMANDS } from "./types.ts";
@@ -338,6 +338,22 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       }
       m.role = text.slice(0, 400);
       saveTeamConfig(config);
+      ensureKit(config); // 同步刷新 BRIEF.md
+      // 已注入过完整身份 → 只发一条精简更新，避免上下文里出现两份职责
+      if (identitySent.has(m.id)) {
+        const p0 = paneIds[config.members.indexOf(m)];
+        if (p0 && paneAlive(p0)) {
+          try {
+            sendText(p0, identityUpdateText(config, m.id));
+            appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name} 发送身份更新` });
+            lastAction = `${m.name} 职责已更新（精简更新，未重复整条身份）`;
+            renderStatus();
+            return;
+          } catch {
+            /* 落到下面按完整注入处理 */
+          }
+        }
+      }
       ensureKit(config); // 同步刷新 BRIEF.md（成员可随时查阅）
       // 立即把新身份注给该成员（上下文里就此带上它的职责）
       const pane = paneIds[config.members.indexOf(m)];
@@ -431,6 +447,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
 
   // --- 身份注入：每次进群都把「短身份」发给每个成员；完整简报只发一次
   const briefed = new Set<string>(config.briefed ?? []);
+  const identitySent = new Set<string>(); // 本次运行已注入完整身份的成员（再改职责只发精简更新）
   // 上下文是新的才注入身份：新建团队 / 引擎重建 / 窗格复活；复用活窗格（resume）不重复注入
   const pendingIdentity = new Set<string>(freshTeam || !contextsAlive ? config.members.map((m) => m.id) : []);
   /** 短身份：每次开局 / 窗格复活后注入（一两句话，省 token） */
@@ -446,6 +463,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       return false;
     }
     pendingIdentity.delete(m.id);
+    identitySent.add(m.id);
     appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name} 注入身份` });
     return true;
   };
