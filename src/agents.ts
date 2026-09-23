@@ -165,8 +165,12 @@ export function sendRaw(paneId: string, keys: string[]): void {
 }
 
 /** Capture the pane's visible screen (ANSI colors preserved). */
-export function captureScreen(paneId: string): string[] {
-  const out = tmux(["capture-pane", "-p", "-e", "-t", paneId]);
+export function captureScreen(paneId: string, historyLines = 0): string[] {
+  // historyLines > 0 时连同滚动历史一起抓（-S -N）
+  const args = ["capture-pane", "-p", "-e"];
+  if (historyLines > 0) args.push("-S", `-${historyLines}`);
+  args.push("-t", paneId);
+  const out = tmux(args);
   const lines = out.split("\n");
   while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
   return lines;

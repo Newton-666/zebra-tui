@@ -147,6 +147,12 @@ export class AgentCell {
     if (this.log.length > MAX_LOG_LINES) this.log.splice(0, this.log.length - MAX_LOG_LINES);
   }
 
+  /** 预载历史（启动时抓窗格 tmux 滚动历史），让空态成员也有可回看内容 */
+  seedLog(lines: string[]): void {
+    const seed = AgentCell.normalize(lines);
+    if (seed.length) this.log = seed.slice(0, MAX_LOG_LINES);
+  }
+
   setScreen(lines: string[], alive: boolean, active: boolean): void {
     this.lines = lines.slice(-TAIL_KEEP);
     this.top.set(alive, active);

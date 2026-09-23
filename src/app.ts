@@ -466,6 +466,17 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   };
   poller.start();
 
+  // 启动时为每个成员预载一段 tmux 滚动历史（内容比格子矮的成员也能回看）
+  config.members.forEach((m, i) => {
+    const pane = paneIds[i];
+    if (!pane) return;
+    try {
+      cells.get(m.id)!.seedLog(captureScreen(pane, 300));
+    } catch {
+      /* 预载失败不影响 */
+    }
+  });
+
   // --- 身份注入：每次进群都把「短身份」发给每个成员；完整简报只发一次
   const briefed = new Set<string>(config.briefed ?? []);
   const identitySent = new Set<string>(); // 本次运行已注入完整身份的成员（再改职责只发精简更新）
