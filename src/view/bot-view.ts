@@ -2,7 +2,7 @@
 // 布局与 app.ts 同构：VStack[header, ScrollView(grow), status, 输入框（两条线，浅蓝）]
 // 流式渲染：thinking（dim 流动行）/ 工具调用（▸ 工具 参数 → 结果行）/ 回答
 import {
-  Input,
+  Editor,
   Markdown,
   ProcessTerminal,
   ScrollView,
@@ -12,13 +12,19 @@ import {
   truncateToWidth,
   visibleWidth,
   type Component,
+  type EditorTheme,
   type MarkdownTheme,
 } from "../../deps/pi-tui/dist/index.js";
 import { bold, dim, fg } from "../ui/ansi.ts";
+import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
 const BLUE = "45"; // 与主输入框一致的浅蓝
+const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+
+/** 与主 app 同源：pi-tui 的 Editor 自己画上下两条线，颜色由 borderColor 决定（重画会被渲染层吃掉） */
+const EDITOR_THEME: EditorTheme = { borderColor: (s: string) => fg(BLUE, s) };
 
 const rule = (w: number, color = "36") => fg(color, "─".repeat(Math.max(0, w - 2)));
 
@@ -62,7 +68,8 @@ export async function runBotFlow(cwd: string): Promise<void> {
 
   const transcript = new Transcript();
   const scroll = new ScrollView(transcript, { follow: "end", scrollbar: "auto", overscroll: "contain" });
-  const input = new Input();
+  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 4 });
+  const clearEditor = (editor as unknown as { setValue?: (v: string) => void }).setValue?.bind(editor);
 
   const push = (...lines: (string | Markdown)[]) => {
     transcript.items.push(...lines);
@@ -80,11 +87,17 @@ export async function runBotFlow(cwd: string): Promise<void> {
   const modelLine = cfg ? `${cfg.model}` : "未配置平台模型——回首页 Platform model 配置";
   const headerComp: Component = {
     render(w: number): string[] {
-      return [
-        ` ${fg("36", "◆")} ${"Krystal Bot"} ${dim("· 原型 · 阅读者档位 · " + modelLine)}`,
-        ` ${dim(cwd)}`,
-        "",
-      ];
+      const inner = Math.max(10, w - 2);
+      const side = w >= LOGO_WIDTH + 46;
+      const tag = ["", ` ${bold("Krystal Bot")} ${dim("· 原型 · 阅读者档位")}`, dim(` ${modelLine}`), dim(` ${cwd}`), ""];
+      const out = [dim("╭" + "─".repeat(inner) + "╮")];
+      for (let r = 0; r < LOGO_ROWS.length; r++) {
+        const logo = fg(KRYSTAL_GRADIENT[r]!, LOGO_ROWS[r]!);
+        const content = side ? ` ${logo}${pad(logo, LOGO_WIDTH)}  ${tag[r] ?? ""}` : ` ${logo}`;
+        out.push(dim("│") + pad(truncateToWidth(content, inner, "…"), inner) + dim("│"));
+      }
+      out.push(dim("╰" + "─".repeat(inner) + "╯"));
+      return out;
     },
     invalidate(): void {},
   };
@@ -96,14 +109,11 @@ export async function runBotFlow(cwd: string): Promise<void> {
   };
   const inputFrame: Component = {
     render(w: number): string[] {
-      const inner = input.render(Math.max(10, w - 4));
-      const body = inner.map((l) => {
-        const pad = Math.max(0, w - 4 - visibleWidth(l));
-        return fg(BLUE, "│ ") + l + " ".repeat(pad) + fg(BLUE, " │");
-      });
-      return [fg(BLUE, "╭" + "─".repeat(Math.max(0, w - 2)) + "╮"), ...body, fg(BLUE, "╰" + "─".repeat(Math.max(0, w - 2)) + "╯")];
+      return editor.render(w); // pi-tui 原生两条线（浅蓝）
     },
-    invalidate(): void {},
+    invalidate(): void {
+      editor.invalidate();
+    },
   };
 
   // 流动行：同一行原地增长（thinking / 回答）
@@ -188,13 +198,14 @@ export async function runBotFlow(cwd: string): Promise<void> {
     void runBotTask({ cfg, cwd, history, signal: abort.signal, onEvent });
   };
 
-  input.onSubmit = () => {
+  editor.onSubmit = (text: string) => {
     if (busy || !cfg) return;
-    const text = input.getValue().trim();
-    if (!text) return;
-    input.setValue("");
-    push(` ${fg("36", "你 ›")} ${text}`);
-    runTurn(text);
+    const body = text.trim();
+    if (!body) return;
+    clearEditor?.("");
+    // pi 风格：提交后输入框清空，消息作为「块」落入对话区（左侧竖线 + 青色前缀）
+    push(fg("36", " ▌") + fg("36", " 你") + "", fg("36", " ▌") + " " + body, "");
+    runTurn(body);
   };
 
   const focusTarget = {
@@ -215,7 +226,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
         }
         return;
       }
-      input.handleInput(data);
+      editor.handleInput(data);
     },
     invalidate(): void {},
     get focused(): boolean {
