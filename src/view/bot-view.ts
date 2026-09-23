@@ -218,6 +218,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let usage = resumed ? lastUsage(loadEvents(sessionId)) : undefined;
   let sessionName: string | undefined = resumed ? loadBotMeta(sessionId)?.name : undefined; // /name 设置
   let picker: SelectList | undefined;
+  let pickerBlock: PickerBlock | undefined;
   let pickerKind: "sessions" | "mode" | undefined;
   let mode: Mode = resumed?.mode ?? loadBotMeta(sessionId)?.mode ?? "readonly";
   let deleteArmed: string | undefined; // 两次 d 删除：第一次只武装并提示
@@ -304,50 +305,47 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     push(dim(`  已回溯到 ${id}`), "");
     refresh();
   };
-  const removePickerItem = () => {
-    const i = transcript.items.indexOf(picker as unknown as Component);
-    if (i >= 0) transcript.items.splice(i, 1);
-  };
-  const openPicker = (startAt?: number) => {
+  /** 选择器块：提示行 + 列表一体，原位替换（绝不堆积多份） */
+  class PickerBlock implements Component {
+    note = "";
+    list: SelectList;
+    constructor(list: SelectList) {
+      this.list = list;
+    }
+    render(w: number): string[] {
+      const head = this.note ? fg("33", `  ${this.note}`) : dim("  回溯历史（↑↓ 恢复 · enter 确认 · d 删除 · esc 返回）");
+      return [head, ...this.list.render(w)];
+    }
+    invalidate(): void {
+      this.list.invalidate();
+    }
+  }
+  const openSessionsPicker = (selectValue?: string): void => {
     const sessions = listBotSessions();
-    if (!sessions.length) {
-      push(dim("  （还没有历史会话）"));
-      return;
-    }
-    const items = [
-      { value: "__cancel", label: "取消", description: "回到当前会话" },
-      ...sessions.map((m) => {
-        const msgs = loadEvents(m.id).filter((e) => e.t === "msg");
-        const firstUser = msgs.find((e) => e.role === "user");
-        return {
-          value: m.id,
-          label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
-          description: `${m.model} · ${msgs.length} 条消息 · ${firstUser?.content.slice(0, 36) ?? "(空)"}`,
-        };
-      }),
-    ];
+    const items = sessions.map((m) => {
+      const msgs = loadEvents(m.id).filter((e) => e.t === "msg");
+      const firstUser = msgs.find((e) => e.role === "user");
+      return {
+        value: m.id,
+        label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
+        description: `${m.model} · ${msgs.length} 条消息 · ${firstUser?.content.slice(0, 36) ?? "(空)"}`,
+      };
+    });
     const list = new SelectList(items, Math.min(items.length, 12), THEME);
+    let idx = selectValue ? items.findIndex((it) => it.value === selectValue) : -1;
+    if (idx < 0 && selectValue) idx = Math.min(selectValue === "__end" ? items.length - 1 : 0, items.length - 1); // 删除后自动跳到下一个
+    if (idx < 0) idx = 0;
+    list.setSelectedIndex(idx);
     list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
-    if (startAt !== undefined) {
-      const idx = items.findIndex((it) => it.value === startAt);
-      list.setSelectedIndex(idx >= 0 ? idx : 0);
-    }
     list.onSelect = (it: { value: string }) => {
-      picker = undefined;
-      pickerKind = undefined;
-      if (it.value !== "__cancel") resumeSession(it.value);
-      tui.requestRender();
+      removePickerBlock();
+      resumeSession(it.value);
     };
-    list.onCancel = () => {
-      picker = undefined;
-      pickerKind = undefined;
-      tui.requestRender();
-    };
-    removePickerItem();
+    list.onCancel = () => removePickerBlock();
     picker = list;
     pickerKind = "sessions";
-    deleteArmed = undefined;
-    push("", dim("  回溯历史（↑↓ 选择 · enter 恢复 · esc 取消 · d 删除）"), list);
+    pickerBlock = new PickerBlock(list);
+    transcript.items.push(pickerBlock);
     refresh();
   };
 
@@ -583,7 +581,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     if (body.startsWith("/") || body.startsWith(":")) {
       const cmd = body.slice(1).trim().toLowerCase();
       clearEditor();
-      if (cmd === "resume" || cmd === "sessions") openPicker();
+      if (cmd === "resume" || cmd === "sessions") openSessionsPicker();
       else if (cmd === "mode") {
         const items = [
           { value: "readonly", label: "Read Only（只读）", description: "白名单通过；写类命令被拦。最安全，适合看代码 / 调研" },
@@ -591,47 +589,26 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           { value: "__cancel", label: "取消", description: `当前：${modeLabel(mode)}` },
         ];
         const list = new SelectList(items, items.length, THEME);
+        const sel = items.findIndex((it) => it.value === mode);
+        list.setSelectedIndex(sel >= 0 ? sel : 0);
+        list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
         list.onSelect = (it: { value: string }) => {
-          picker = undefined;
+          removePickerBlock();
           if (it.value !== "__cancel") {
             mode = it.value as Mode;
             setSessionMode(sessionId, mode);
             push(dim(`  终端模式已切换：${modeLabel(mode)}（立即生效）`), "");
           }
-          tui.requestRender();
+          refresh();
         };
-        list.onCancel = () => {
-          picker = undefined;
-          tui.requestRender();
-        };
+        list.onCancel = () => removePickerBlock();
         picker = list;
         pickerKind = "mode";
-        push("", dim("  终端模式（↑↓ 选择 · enter 确认 · esc 取消）"), list);
+        pickerBlock = new PickerBlock(list);
+        pickerBlock.note = "终端模式（↑↓ 选择 · enter 确认 · esc 取消）";
+        transcript.items.push(pickerBlock);
         refresh();
         return;
-      }
-      else if (cmd === "new") {
-        sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者", mode }).id;
-        transcript.items = [...pushIntro(cfg.model, cwd), ""];
-        appendEvent(sessionId, { t: "intro", at: new Date().toISOString(), cwd, model: cfg.model, tier: "阅读者" });
-        usage = undefined;
-        prevHistory = undefined;
-        prefixStable = undefined;
-        foldCount = 0;
-        summaryActive = false;
-        push(dim("  新会话已开始"), "");
-        refresh();
-      } else if (cmd.startsWith("name")) {
-        const nm = body.slice(body.indexOf("name") + 4).trim();
-        if (!nm) {
-          push(dim(`  当前会话名：${sessionName ?? "（未命名）"}  用法：/name <名称>`), "");
-        } else {
-          const m = renameSession(sessionId, nm);
-          sessionName = m?.name;
-          if (m) push(dim(`  会话已命名为「${m.name}」（历史列表 /resume 里可见）`), "");
-          else push(fg("31", "  命名失败（会话元数据不可写）"), "");
-        }
-        refresh();
       } else if (cmd === "memory" || cmd === "mem") {
         const g = renderGraph();
         push("", ...g.lines.map((l) => (l.startsWith("●") || l.startsWith("○") ? fg("36", l) : dim(l))), "");
@@ -684,44 +661,36 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           picker.handleInput(data);
           return;
         }
-        // 两次 d 删除：第一次武装并提示，第二次才真正移入 .trash（可恢复）
+        // 两次 d 删除：第一次武装，第二次删除并**自动跳到下一个会话**
         if (data === "d" || data === "D") {
           const sel = picker.getSelectedItem();
-          const id = sel && sel.value !== "__cancel" ? sel.value : undefined;
-          if (!id) {
-            push(dim("  （「取消」不可删除）"));
-            refresh();
-            return;
-          }
+          const id = sel?.value;
+          if (!id || !pickerBlock) return;
           if (deleteArmed !== id) {
             deleteArmed = id;
-            const label = String(sel?.label ?? id);
-            push(fg("33", `  ⚠ 再按一次 d 即删除会话「${label}」——移入 sessions/.trash（可手动恢复），按其他键取消`));
-            refresh();
+            pickerBlock.note = `再按一次 d 删除「${String(sel?.label ?? id)}」（移入 .trash，可恢复）`;
+            tui.requestRender();
             return;
           }
-          const r = trashSession(id);
           deleteArmed = undefined;
+          const r = trashSession(id);
           if (!r.ok) {
-            push(fg("31", `  删除失败：${r.error ?? "未知错误"}`));
-            refresh();
+            pickerBlock.note = `删除失败：${r.error ?? "未知错误"}`;
+            tui.requestRender();
             return;
           }
-          push(dim(`  已删除会话 ${id}（移入 .trash，可手动恢复）——可继续删除，esc 返回`));
           if (id === sessionId) {
-            // 删的是当前会话：静默新开一个（继承模式），回到聊天时是干净的新会话
+            // 删的是当前会话：静默新开一个（继承模式）
             sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
-            setSessionMode(sessionId, mode);
             transcript.items = [];
-            usage = undefined;
-            prevHistory = undefined;
-            prefixStable = undefined;
-            foldCount = 0;
-            summaryActive = false;
           }
-          const keep = pickerSel; // 记住选中项，重开列表后恢复位置
-          openPicker(keep); // 留在列表里，可连续删除
+          openSessionsPicker(id); // 删除后自动落在下一个会话上 → 连续 d 连删
           return;
+        }
+        if (deleteArmed) {
+          deleteArmed = undefined;
+          if (pickerBlock) pickerBlock.note = "";
+          tui.requestRender();
         }
         if (deleteArmed) {
           deleteArmed = undefined; // 其他键 → 取消武装
