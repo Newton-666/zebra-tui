@@ -19,6 +19,16 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
+import {
+  appendEvent,
+  contextWindow,
+  createBotSession,
+  lastUsage,
+  loadBotMeta,
+  loadEvents,
+  messagesFrom,
+  touchSession,
+} from "../session.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
@@ -161,7 +171,7 @@ class StreamText implements Component {
   invalidate(): void {}
 }
 
-export async function runBotFlow(cwd: string): Promise<void> {
+export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> {
   const cfg: BuilderConfig | undefined = loadBuilder();
   const terminal = new ProcessTerminal();
   const tui = new TuiAltScreen(terminal, false, undefined, { wheelScrollLines: 3 });
@@ -186,13 +196,51 @@ export async function runBotFlow(cwd: string): Promise<void> {
     refresh();
   };
 
+  // ── 会话：续聊则重放事件（与中断前同一前缀 → 缓存立刻恢复），否则新开一个
+  const resumed = resumeId ? loadBotMeta(resumeId) : undefined;
+  const sessionId = resumed?.id ?? createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
+  const events = resumed ? loadEvents(sessionId) : [];
+  let usage = resumed ? lastUsage(events) : undefined;
+  // 本地「前缀稳定性」：与上一回合的稳定前缀逐字节比对（provider 不报 cached_tokens 时的可靠判据）
+  let prevHistory: unknown[] | undefined;
+  let prefixStable: boolean | undefined;
+  /** 前缀稳定性 = 「旧上下文是新上下文的前缀」（append-only 检测）。增长是正常的；重写才是问题 */
+  const checkPrefix = (history: unknown[]) => {
+    if (!prevHistory) {
+      prefixStable = undefined;
+    } else {
+      prefixStable =
+        history.length >= prevHistory.length &&
+        prevHistory.every((m, i) => JSON.stringify(m) === JSON.stringify(history[i]));
+    }
+    prevHistory = JSON.parse(JSON.stringify(history)) as unknown[];
+  };
   let busy = false;
   let state = cfg ? "空闲" : "未配置";
   let tokens = 0;
   const abort = new AbortController();
-  const history: { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[] = [];
 
   const modelLine = cfg ? `${cfg.model}` : "未配置平台模型——回首页 Platform model 配置";
+  if (resumed) {
+    const toolById = new Map<string, ToolBlock>();
+    for (const e of events) {
+      if (e.t === "msg" && e.role === "user") transcript.items.push(new UserBlock(e.content), "");
+      else if (e.t === "msg" && e.role === "assistant") {
+        if (e.toolCalls?.length) {
+          for (const tc of e.toolCalls) {
+            const b = new ToolBlock(tc.name, tc.args);
+            toolById.set(tc.id, b);
+            transcript.items.push(b);
+          }
+        } else if (e.content.trim()) transcript.items.push(new Markdown(e.content, 1, 0, BOT_THEME), "");
+      } else if (e.t === "msg" && e.role === "tool") {
+        const b = e.toolCallId ? toolById.get(e.toolCallId) : undefined;
+        const denied = e.content.startsWith("[策略闸门拒绝]");
+        b?.setResult(!denied, denied, e.content.replace(/^\[策略闸门拒绝\] /, ""));
+      }
+    }
+  }
+
   const headerComp: Component = {
     render(w: number): string[] {
       const inner = Math.max(10, w - 2);
@@ -217,7 +265,14 @@ export async function runBotFlow(cwd: string): Promise<void> {
   };
   const statusComp: Component = {
     render(w: number): string[] {
-      return [truncateToWidth(` ${dim(`state: ${busy ? state : "空闲"} · ~${(tokens / 1000).toFixed(1)}k tokens · esc 中断 · ctrl+c 退出`)}`, w)];
+      const win = contextWindow(cfg?.model ?? "");
+      const ctx = usage ? Math.round((usage.prompt / win) * 100) : Math.round((tokens / win) * 100);
+      // provider 普遍不报（GLM 实测恒为 0）→ 报 0 时显示「—」而不是误导性的 0%
+      const cache = usage && usage.cached > 0 ? `${Math.round((usage.cached / usage.prompt) * 100)}%` : "—";
+      const tok = usage ? `${usage.prompt} tok` : `~${tokens.toFixed(0)} tok`;
+      const pfx = prefixStable === undefined ? "前缀 —" : prefixStable ? "前缀 稳定" : "前缀 变化";
+      const seg = `state: ${busy ? state : "空闲"} · 上下文 ~${ctx}% · 缓存 ${cache} · ${pfx} · ${tok} · ${cfg?.model ?? ""}`;
+      return [truncateToWidth(` ${dim(`${seg} · esc 中断 · ctrl+c 退出`)}`, w)];
     },
     invalidate(): void {},
   };
@@ -307,7 +362,36 @@ export async function runBotFlow(cwd: string): Promise<void> {
       case "tool_result": {
         currentTool?.setResult(e.ok, e.denied, e.output);
         currentTool = undefined;
+        appendEvent(sessionId, {
+          t: "msg",
+          at: new Date().toISOString(),
+          role: "tool",
+          content: (e.denied ? "[策略闸门拒绝] " : "") + e.output,
+          toolCallId: e.id,
+        });
         refresh();
+        break;
+      }
+      case "assistant": {
+        appendEvent(sessionId, {
+          t: "msg",
+          at: new Date().toISOString(),
+          role: "assistant",
+          content: e.content,
+          toolCalls: e.toolCalls,
+        });
+        break;
+      }
+      case "usage": {
+        usage = { prompt: e.prompt, cached: e.cached, completion: e.completion };
+        appendEvent(sessionId, {
+          t: "usage",
+          at: new Date().toISOString(),
+          prompt: e.prompt,
+          cached: e.cached,
+          completion: e.completion,
+          model: cfg?.model ?? "",
+        });
         break;
       }
       case "final": {
@@ -321,7 +405,8 @@ export async function runBotFlow(cwd: string): Promise<void> {
           push(new Markdown(e.text, 1, 0, BOT_THEME));
           push("");
         }
-        history.push({ role: "assistant", content: e.text });
+        appendEvent(sessionId, { t: "msg", at: new Date().toISOString(), role: "assistant", content: e.text });
+        touchSession(sessionId);
         busy = false;
         break;
       }
@@ -339,7 +424,9 @@ export async function runBotFlow(cwd: string): Promise<void> {
     if (!cfg) return;
     busy = true;
     state = "连接中";
-    history.push({ role: "user", content: text });
+    // 每回合从事件流重建上下文：只追加、顺序稳定 → 前缀缓存友好（§13.2）
+    const history = messagesFrom(loadEvents(sessionId));
+    checkPrefix(history);
     void runBotTask({ cfg, cwd, history, signal: abort.signal, onEvent });
   };
 
@@ -350,6 +437,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
     clearEditor();
     // pi 风格：消息以「整宽蓝色背景块」落入对话区（块后留一空行）
     push(new UserBlock(body), "");
+    appendEvent(sessionId, { t: "msg", at: new Date().toISOString(), role: "user", content: body });
     runTurn(body);
   };
 

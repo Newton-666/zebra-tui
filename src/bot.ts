@@ -124,6 +124,8 @@ export interface StreamHandlers {
   onThinking?: (delta: string) => void;
   onText?: (delta: string) => void;
   onToolArgs?: (name: string, argsSoFar: string) => void;
+  /** 真实用量（含缓存命中）：stream_options.include_usage 时由流末尾分片带回 */
+  onUsage?: (u: { prompt: number; cached: number; completion: number }) => void;
 }
 
 export async function streamChat(
@@ -140,6 +142,7 @@ export async function streamChat(
       messages,
       tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })),
       stream: true,
+      stream_options: { include_usage: true }, // 真实 usage + cached_tokens（§13.5 度量）
     }),
     signal: h.signal ?? AbortSignal.timeout(180_000),
   });
@@ -161,7 +164,17 @@ export async function streamChat(
       if (payload === "[DONE]") continue;
       let delta: { content?: string; reasoning_content?: string; tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[] };
       try {
-        const json = JSON.parse(payload) as { choices?: { delta?: typeof delta }[] };
+        const json = JSON.parse(payload) as {
+          choices?: { delta?: typeof delta }[];
+          usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+        };
+        if (json.usage) {
+          h.onUsage?.({
+            prompt: json.usage.prompt_tokens ?? 0,
+            cached: json.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            completion: json.usage.completion_tokens ?? 0,
+          });
+        }
         delta = json.choices?.[0]?.delta ?? {};
       } catch {
         continue;
@@ -181,17 +194,20 @@ export async function streamChat(
       }
     }
   }
-  return { content, toolCalls: [...acc.values()].sort((a, b) => Number(a.id) - Number(b.id)) };
+  // 工具调用顺序 = Map 插入序（流里的 index 顺序）；此前按 Number(id) 排序是错的（id 非数字 → NaN）
+  return { content, toolCalls: [...acc.values()] };
 }
 
 // ---------- Bot 循环（等输入 → 模型 → 工具 → 回填 → 直到 final） ----------
 
 export type BotEvent =
   | { type: "thinking"; delta: string }
+  | { type: "usage"; prompt: number; cached: number; completion: number }
+  | { type: "assistant"; content: string; toolCalls: { id: string; name: string; args: string }[] }
   | { type: "tool_args"; name: string; argsSoFar: string }
   | { type: "text"; delta: string }
-  | { type: "tool_start"; name: string; args: string }
-  | { type: "tool_result"; name: string; ok: boolean; denied: boolean; output: string }
+  | { type: "tool_start"; id: string; name: string; args: string }
+  | { type: "tool_result"; id: string; name: string; ok: boolean; denied: boolean; output: string }
   | { type: "final"; text: string }
   | { type: "error"; message: string };
 
@@ -220,16 +236,18 @@ export async function runBotTask(opts: {
         onThinking: (d) => onEvent({ type: "thinking", delta: d }),
         onText: (d) => onEvent({ type: "text", delta: d }),
         onToolArgs: (name, argsSoFar) => onEvent({ type: "tool_args", name, argsSoFar }),
+        onUsage: (u) => onEvent({ type: "usage", ...u }),
       });
       if (!toolCalls.length) {
         onEvent({ type: "final", text: content });
         return;
       }
+      onEvent({ type: "assistant", content, toolCalls: toolCalls.map((t) => ({ id: t.id, name: t.name, args: t.args })) });
       messages.push({ role: "assistant", content: content || null, tool_calls: toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: t.args } })) });
       for (const t of toolCalls) {
-        onEvent({ type: "tool_start", name: t.name, args: t.args });
+        onEvent({ type: "tool_start", id: t.id, name: t.name, args: t.args });
         const r = await executeTool(t.name, t.args, cwd);
-        onEvent({ type: "tool_result", name: t.name, ok: r.ok, denied: !!r.denied, output: r.output });
+        onEvent({ type: "tool_result", id: t.id, name: t.name, ok: r.ok, denied: !!r.denied, output: r.output });
         messages.push({ role: "tool", tool_call_id: t.id, content: (r.denied ? "[策略闸门拒绝] " : "") + r.output });
       }
     }

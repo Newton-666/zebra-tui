@@ -63,7 +63,7 @@ async function main() {
       result = await runWizardFlow(opts.dir ?? process.cwd());
       if (result.action !== "bot") break;
       const { runBotFlow } = await import("./view/bot-view.ts");
-      await runBotFlow(opts.dir ?? process.cwd());
+      await runBotFlow(opts.dir ?? process.cwd(), result.resumeId);
     }
   }
 
