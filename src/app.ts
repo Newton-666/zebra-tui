@@ -17,6 +17,7 @@ import {
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
 import { briefText, ensureKit, identityText, identityUpdateText } from "./kit.ts";
+import { conflicts, renderGraph } from "./memory.ts";
 import { withModel } from "./models.ts";
 import { ModelPicker } from "./view/model-picker.ts";
 import { DEFAULT_COMMANDS } from "./types.ts";
@@ -244,7 +245,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   };
 
   const COMMAND_HELP =
-    "命令: :model 换模型 · :role <成员> <一句话> 设身份 · :to [成员] 锁定 · :brief 重发简报 · :team 重建 · :help · :quit";
+    "命令: :memory 记忆图 · :conflicts 矛盾 · :model 换模型 · :role 设身份 · :to 锁定 · :brief 重发简报 · :team 重建 · :help · :quit";
   const COMMAND_HELP_FULL = [
     "Krystal 命令（: 与 / 等价）",
     "  :model                 查看各成员当前模型",
@@ -252,6 +253,8 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     "  :model <成员> <模型>     切换该成员模型（重启窗格并重注入身份）",
     "  :to [成员|all]         锁定默认目标（不加 @ 时发给谁）",
     "  :role <成员> <一句话>   设定/修改该成员的身份并立即注入",
+    "  :memory                团队记忆图（krystal board 的断言会记入，带断言者）",
+    "  :conflicts             矛盾检测：成员断言互相打架时，主动摆到你面前",
     "  :brief [成员]          重发身份与团队简报",
     "  :team                  tmux 引擎丢失时重建",
     "  :help                  本帮助      :quit  退出",
@@ -275,7 +278,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     if (trimmed.startsWith(":")) {
       // 已知命令处理；未知命令只提示、绝不广播给成员
       const word = trimmed.split(/\s+/)[0]!;
-      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":go", ":team", ":help", ":h"];
+      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":go", ":team", ":help", ":h", ":memory", ":conflicts"];
       if (!known.includes(word) && !known.some((k) => word.startsWith(k))) {
         lastAction = `未知命令 ${word}（${COMMAND_HELP}）`;
         renderStatus();
@@ -401,6 +404,30 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       const targets = lockedTo ? config.members.filter((m) => m.id === lockedTo) : [...config.members];
       dispatch(targets.length ? targets : [...config.members], msg);
       lastAction = `已派工（${targets.map((t) => t.name).join(",") || "全体"}）：${truncateToWidth(body, 40, "…")}`;
+      renderStatus();
+      return;
+    }
+    if (trimmed === ":memory" || trimmed === ":mem") {
+      const g = renderGraph(config.id);
+      flashMsg(
+        [
+          `记忆图（${config.name}）：${g.facts} 事实 · ${g.entities} 实体 · ${g.edges} 关联${g.conflicts ? ` · ${g.conflicts} 矛盾` : ""}`,
+          ...g.lines.map((l) => l),
+        ].join("\n"),
+      );
+      renderStatus();
+      return;
+    }
+    if (trimmed === ":conflicts") {
+      const cs = conflicts(config.id);
+      flashMsg(
+        cs.length
+          ? [
+              `发现 ${cs.length} 处矛盾——需要你裁决：`,
+              ...cs.map((c, i) => `${i + 1}. ${c.reason}\n   A [${c.a.id}] ${c.a.text}（by ${c.a.by}）\n   B [${c.b.id}] ${c.b.text}（by ${c.b.by}）`),
+            ].join("\n")
+          : "（当前没有发现矛盾断言）",
+      );
       renderStatus();
       return;
     }

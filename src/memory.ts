@@ -17,6 +17,8 @@ export interface Fact {
   created: string;
   updated: string;
   supersededBy?: string;
+  /** 归属：undefined = 全局（Bot 的记忆）；team-xxx = 某团队（团队断言互不污染） */
+  scope?: string;
 }
 
 type Line =
@@ -85,13 +87,13 @@ export function loadFacts(): Fact[] {
 
 export const activeFacts = (facts: Fact[]): Fact[] => facts.filter((f) => !f.supersededBy);
 
-export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number }
+export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number; scope?: string }
 
 export function addFact(input: AddInput): Fact & { existed?: boolean } {
   const at = new Date().toISOString();
   // 一主题一条：同文本的活跃事实 → 更新原条（加强信任），不新增（否则重复记忆会淹没注入块）
-  const key = input.text.trim().toLowerCase();
-  const dup = activeFacts(loadFacts()).find((f) => f.text.trim().toLowerCase() === key);
+  const key = `${input.scope ?? ""}\u0000${input.text.trim().toLowerCase()}`;
+  const dup = activeFacts(loadFacts()).find((f) => `${f.scope ?? ""}\u0000${f.text.trim().toLowerCase()}` === key);
   if (dup && key) {
     const trust = Math.min(1, dup.trust + 0.05);
     append({ t: "fact_update", id: dup.id, patch: { updated: at, trust } });
@@ -108,6 +110,7 @@ export function addFact(input: AddInput): Fact & { existed?: boolean } {
     used: 0,
     created: at,
     updated: at,
+    scope: input.scope,
   };
   append({ t: "fact", f });
   writeMirror();
@@ -164,9 +167,9 @@ const score = (f: Fact, ts: string[]) => {
   return s * (0.5 + f.trust);
 };
 
-export function recall(query: string, limit = 6): Fact[] {
+export function recall(query: string, limit = 6, scope?: string): Fact[] {
   const ts = toks(query);
-  return activeFacts(loadFacts())
+  return activeFacts(loadFacts()).filter((f) => !scope || f.scope === scope)
     .map((f) => ({ f, s: score(f, ts) }))
     .filter((x) => x.s > 0)
     .sort((a, b) => b.s - a.s || (a.f.created < b.f.created ? 1 : -1))
@@ -174,21 +177,26 @@ export function recall(query: string, limit = 6): Fact[] {
     .map((x) => x.f);
 }
 
-export const about = (entity: string, limit = 8): Fact[] =>
-  activeFacts(loadFacts()).filter((f) => f.entities.some((e) => e.toLowerCase().includes(entity.toLowerCase()))).slice(0, limit);
+export const about = (entity: string, limit = 8, scope?: string): Fact[] =>
+  activeFacts(loadFacts())
+    .filter((f) => !scope || f.scope === scope)
+    .filter((f) => f.entities.some((e) => e.toLowerCase().includes(entity.toLowerCase())))
+    .slice(0, limit);
 
 /** 一跳邻居：与「关于 entity 的事实」共享其他实体的事实 */
 export function related(entity: string, limit = 8): Fact[] {
-  const base = about(entity);
+  const base = about(entity, 8, scope);
   const shared = new Set(base.flatMap((f) => f.entities.map((e) => e.toLowerCase())).filter((e) => !e.includes(entity.toLowerCase())));
   return activeFacts(loadFacts())
+    .filter((f) => !scope || f.scope === scope)
     .filter((f) => !base.includes(f) && f.entities.some((e) => shared.has(e.toLowerCase())))
     .slice(0, limit);
 }
 
 /** 交集：同时关联两实体的事实 */
-export const connect = (a: string, b: string, limit = 8): Fact[] =>
+export const connect = (a: string, b: string, limit = 8, scope?: string): Fact[] =>
   activeFacts(loadFacts())
+    .filter((f) => !scope || f.scope === scope)
     .filter((f) => {
       const es = f.entities.map((e) => e.toLowerCase());
       return es.some((e) => e.includes(a.toLowerCase())) && es.some((e) => e.includes(b.toLowerCase()));
@@ -205,8 +213,8 @@ const OPPOSITES: [RegExp, RegExp][] = [
 // 同一组事实里，只保留最近 3 条参与比对（越旧越可能是历史状态）
 const CONFLICT_PER_ENTITY = 3;
 
-export function conflicts(): { a: Fact; b: Fact; reason: string }[] {
-  const active = activeFacts(loadFacts());
+export function conflicts(scope?: string): { a: Fact; b: Fact; reason: string }[] {
+  const active = activeFacts(loadFacts()).filter((f) => !scope || f.scope === scope);
   // 每个实体只取最近 N 条：历史状态之间的"矛盾"不是矛盾
   const recent = new Set<string>();
   const byEntity = new Map<string, Fact[]>();
@@ -240,8 +248,12 @@ export function conflicts(): { a: Fact; b: Fact; reason: string }[] {
 // ---------- 注入块（稳定序 → 缓存友好；不含年龄/次数等易变值） ----------
 
 export const PIN_LIMIT = 20;
-export function memoryBlock(limit = PIN_LIMIT): string {
-  const facts = activeFacts(loadFacts()).slice().sort((a, b) => (a.created < b.created ? -1 : 1)); // 稳定序：创建序
+export function memoryBlock(limit = PIN_LIMIT, scope?: string): string {
+  // 注入块默认只取「全局记忆」（scope 未设的）；团队断言有各自 scope，不污染 Bot 的上下文
+  const facts = activeFacts(loadFacts())
+    .filter((f) => (scope ? f.scope === scope : !f.scope))
+    .slice()
+    .sort((a, b) => (a.created < b.created ? -1 : 1)); // 稳定序：创建序
   if (!facts.length) return "";
   const lines = facts.slice(0, limit).map((f) => `- ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""}`);
   return `[长期记忆（facts.jsonl 的镜像；可用 memory 工具 recall/about/connect 检索）]\n${lines.join("\n")}`;
@@ -352,8 +364,8 @@ export const renderFacts = (facts: Fact[], emptyHint = "（没有匹配的记忆
 
 export interface GraphView { lines: string[]; facts: number; entities: number; superseded: number; edges: number; conflicts: number }
 
-export function renderGraph(): GraphView {
-  const all = loadFacts();
+export function renderGraph(scope?: string): GraphView {
+  const all = loadFacts().filter((f) => !scope || f.scope === scope);
   const active = activeFacts(all);
   const superseded = all.length - active.length;
 
@@ -376,8 +388,7 @@ export function renderGraph(): GraphView {
     }
   }
 
-  const cs = conflicts();
-  const lines: string[] = [];
+    const cs = conflicts(scope); const lines: string[] = [];
   lines.push(
     `记忆图：${active.length} 条事实 · ${byEntity.size} 个实体 · ${edge.size} 条关联` +
       `${superseded ? ` · ${superseded} 条被取代（不注入，可检索）` : ""}` +

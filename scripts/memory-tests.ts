@@ -93,3 +93,20 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log("\nALL MEMORY TESTS PASS");
+// ── 团队线接入记忆图：断言带 by+scope+evidence；conflicts(scope) 抓矛盾；团队/Bot 互不污染
+{
+  const scope = "team-3up";
+  const addBy = (member: string, text: string) => M.addFact({ text, entities: ["npm test", scope], by: `${scope}/${member}`, scope, trust: 0.7 });
+  const a = addBy("architrct", "npm test 通过，闸门已就绪");
+  const b = addBy("Verifyer", "npm test 失败，闸门缺失");
+  M.addFact({ text: "Bot 的全局事实：平台模型由用户配置", by: "bot" });
+  assert.ok(a.scope === scope && a.by === `${scope}/architrct`, "断言应带 by 与 scope");
+  const cs = M.conflicts(scope);
+  assert.ok(cs.some((c) => (c.a.id === a.id && c.b.id === b.id) || (c.a.id === b.id && c.b.id === a.id)), "应发现成员间相反断言");
+  assert.ok(!M.memoryBlock().includes("npm test 通过"), "团队断言不进入 Bot 注入块（scope 隔离）");
+  const g = M.renderGraph(scope);
+  assert.ok(g.facts >= 2 && g.conflicts >= 1, "团队记忆图应含断言与矛盾");
+  const kitSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "kit.ts"), "utf8");
+  assert.ok(kitSrc.includes('JSON.stringify({ t: "fact", f: fact })') && kitSrc.includes("scope: team.id"), "kit helper 应写团队记忆（格式守卫）");
+  console.log(`9) 团队线接入记忆图 ✓ ${g.facts} 事实 / ${g.conflicts} 矛盾 / Bot 注入块不受污染`);
+}

@@ -1,6 +1,7 @@
 // Krystal — 团队工具包：为每个成员生成会话内协作命令（krystal）+ 团队简报（BRIEF.md）
 // 成员在自己终端里执行 krystal roster / send / board，即可感知队友并互通消息
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { sessionDir } from "./team.ts";
 import type { TeamConfig } from "./types.ts";
@@ -148,7 +149,31 @@ function cmdBoard(_c, args) {
     const entry = \`- [\${new Date().toISOString().slice(0, 16).replace("T", " ")}] \${m.name}: \${args.join(" ")}\`;
     fs.appendFileSync(boardPath, entry + "\\n");
     appendHistory({ t: new Date().toISOString(), type: "note", text: \`白板追加（\${m.name}）: \${args.join(" ")}\` });
-    console.log("已追加到团队白板");
+    // 同时记入团队记忆图（事实是节点、实体是边；scope=团队id，断言者=成员）
+    try {
+      const team = JSON.parse(fs.readFileSync(path.join(HOME, "team.json"), "utf8"));
+      const text = args.join(" ");
+      const at2 = new Date().toISOString();
+      const fact = {
+        id: at2.slice(0, 19).replace(/[-:T]/g, "") + Math.random().toString(36).slice(2, 6),
+        text: text.slice(0, 600),
+        entities: [...new Set((text.match(/[\w./-]+\.(?:ts|js|py|md|json|toml|yaml|sh)/g) || []).concat([team.id]))].slice(0, 8),
+        by: team.id + "/" + m.name,
+        evidence: (text.match(/[^\s:]+:[0-9]+/g) || [])[0],
+        trust: 0.7,
+        used: 0,
+        created: at2,
+        updated: at2,
+        scope: team.id,
+      };
+      const factsFile = path.join(os.homedir(), ".krystal", "facts.jsonl");
+      fs.mkdirSync(path.dirname(factsFile), { recursive: true });
+      fs.appendFileSync(factsFile, JSON.stringify({ t: "fact", f: fact }) + "\n");
+      lines_msg = "已追加到团队白板（并记入团队记忆图）";
+    } catch {
+      lines_msg = "已追加到团队白板";
+    }
+    console.log(lines_msg);
     return;
   }
   if (!fs.existsSync(boardPath)) {
