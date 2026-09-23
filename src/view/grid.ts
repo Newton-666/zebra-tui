@@ -9,7 +9,7 @@ import {
 } from "../../deps/pi-tui/dist/index.js";
 import { LAYOUT_NODE, getLayoutNode, type LayoutNode } from "../../deps/pi-tui/dist/layout-node.js";
 import { dim, fg } from "../ui/ansi.ts";
-import type { Member } from "../types.ts";
+import { columnCount, type Member } from "../types.ts";
 import { AgentCell } from "./cell.ts";
 
 export interface GridGeometry {
@@ -41,7 +41,7 @@ export class TeamGrid implements Component {
   private lastBuildKey = "";
 
   constructor(members: Member[], cells: Map<string, AgentCell>, ratios: number[] | undefined, getWidth: () => number) {
-    const cols = members.length <= 1 ? 1 : 2;
+    const cols = columnCount(members.length);
     this.columns = Array.from({ length: cols }, () => []);
     members.forEach((m, i) => this.columns[i % cols]!.push(m));
     this.cells = cells;

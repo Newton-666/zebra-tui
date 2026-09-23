@@ -49,3 +49,6 @@ export const MEMBER_COLORS: Record<string, string> = {
   kimi: "32",    // green
   custom: "34",  // blue
 };
+
+/** 网格列数：1 人单列；3 人三列（各占满高，避免 2+1 畸形）；其余两列 */
+export const columnCount = (n: number): number => (n <= 1 ? 1 : n === 3 ? 3 : 2);

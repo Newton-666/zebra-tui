@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { saveTeamConfig, sessionDir } from "./team.ts";
 import { ensureKit } from "./kit.ts";
-import type { Member, TeamConfig } from "./types.ts";
+import { columnCount, type Member, type TeamConfig } from "./types.ts";
 
 /** 成员窗格的环境：身份 + 会话工具包 PATH（`zebra roster/send/board` 可用） */
 function envArgs(config: TeamConfig, member: Member): string[] {
@@ -63,15 +63,15 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
   // -x/-y: detached 会话默认 80x24，split 后每格过小，部分 TUI 会直接退出
   tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", ...envArgs(config, first), "-c", config.cwd, cmdOf(0)]);
 
-  // 排列与 zebra 网格对齐：i=1 横切分两列；i>=2 竖切到同列队友(i-2)下方
+  const cols = columnCount(config.members.length);
   // 每个 pane 创建后立刻 remain-on-exit，命令秒退也不会破坏链路
   const paneIds: string[] = [];
   const firstId = tmux(["list-panes", "-t", name, "-F", "#{pane_id}"]).trim();
   paneIds.push(firstId);
   tmux(["set-option", "-p", "-t", firstId, "remain-on-exit", "on"]);
   for (let i = 1; i < config.members.length; i++) {
-    const anchor = i === 1 ? paneIds[0]! : paneIds[i - 2]!;
-    const flags = i === 1 ? ["-h"] : ["-v"];
+    const anchor = i < cols ? paneIds[i - 1]! : paneIds[i - cols]!;
+    const flags = i < cols ? ["-h"] : ["-v"];
     // 注意: -P -F 必须放在命令串之前，否则会被吞进命令里
     const out = tmux([
       "split-window",
