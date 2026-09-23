@@ -6,6 +6,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
+import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
+import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
 
 const execAsync = promisify(exec);
 
@@ -222,6 +224,8 @@ export type BotEvent =
   | { type: "thinking"; delta: string }
   | { type: "usage"; prompt: number; cached: number; completion: number }
   | { type: "retry"; attempt: number; max: number; waitMs: number; reason: string }
+  | { type: "context"; stage: "folding" | "summarizing" | "summarize_failed"; folded?: number }
+  | { type: "summary"; text: string }
   | { type: "assistant"; content: string; toolCalls: { id: string; name: string; args: string }[] }
   | { type: "tool_args"; name: string; argsSoFar: string }
   | { type: "text"; delta: string }
@@ -242,13 +246,45 @@ const SYSTEM = (cwd: string, tier: string) => `你是 Krystal Bot——Krystal �
 export async function runBotTask(opts: {
   cfg: BuilderConfig;
   cwd: string;
-  history: { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[];
+  events: SessionEvent[];
   signal?: AbortSignal;
   onEvent: (e: BotEvent) => void;
   maxTurns?: number;
 }): Promise<void> {
-  const { cfg, cwd, history, signal, onEvent, maxTurns = 8 } = opts;
-  const messages: unknown[] = [{ role: "system", content: SYSTEM(cwd, "阅读者") }, ...history];
+  const { cfg, cwd, events, signal, onEvent, maxTurns = 8 } = opts;
+  // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
+  const system = SYSTEM(cwd, "阅读者");
+  const win = contextWindow(cfg.model);
+  const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));
+  const summarizeAt = Number(process.env.KRYSTAL_CONTEXT_SUMMARIZE_AT ?? Math.round(win * 0.85));
+  const keepRecent = 6;
+  let summary = latestNote(events);
+  let asm = assembleContext({ system, events, summary, foldAt, summarizeAt, keepRecent });
+  if (asm.toSummarize?.length) {
+    onEvent({ type: "context", stage: "summarizing" });
+    const text = await summarize(cfg, asm.toSummarize, signal);
+    if (text) {
+      summary = text;
+      onEvent({ type: "summary", text });
+      asm = assembleContext({ system, events, summary, foldAt, summarizeAt, keepRecent });
+    } else {
+      // 降级也要可见（绝不静默）：本轮不摘要，但仍做折叠
+      onEvent({ type: "context", stage: "summarize_failed" });
+      asm = assembleContext({ system, events, foldAt, summarizeAt, keepRecent, allowSummarize: false });
+    }
+  }
+  if (asm.folded) onEvent({ type: "context", stage: "folding", folded: asm.folded });
+  if (process.env.KRYSTAL_CONTEXT_DEBUG) {
+    // 临时诊断：装配决策（不参与业务逻辑）
+    try {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(
+        "/tmp/kb-ctx.log",
+        `win=${win} foldAt=${foldAt} summarizeAt=${summarizeAt} est=${estimateTokens([{ role: "system", content: system }, ...asm.messages])} toSum=${asm.toSummarize?.length ?? 0} folded=${asm.folded} usedSummary=${asm.usedSummary}\n`,
+      );
+    } catch {}
+  }
+  const messages: unknown[] = withSystem(system, asm);
   try {
     for (let turn = 0; turn < maxTurns; turn++) {
       // ── 重试：可重试错误等 10 秒再来，最多 3 次尝试

@@ -107,6 +107,15 @@ export function lastUsage(events: SessionEvent[]): { prompt: number; cached: num
   return undefined;
 }
 
+/** 最近一条 note（M1 摘要落在这里） */
+export function latestNote(events: SessionEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e && e.t === "note") return e.text;
+  }
+  return undefined;
+}
+
 /** 重放为模型上下文（只取 msg 事件，顺序不变 → 前缀稳定） */
 export function messagesFrom(events: SessionEvent[]): { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[] {
   const out: { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[] = [];

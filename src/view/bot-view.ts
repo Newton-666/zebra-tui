@@ -26,6 +26,7 @@ import {
   createBotSession,
   lastUsage,
   loadBotMeta,
+  latestNote as lastSummary,
   loadEvents,
   listBotSessions,
   messagesFrom,
@@ -210,6 +211,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let sessionId = resumed?.id ?? createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
   let usage = resumed ? lastUsage(loadEvents(sessionId)) : undefined;
   let picker: SelectList | undefined;
+  let foldCount = 0; // 本回合折叠的工具输出条数（上下文回收的可见性）
+  let summaryActive = resumed ? !!lastSummary(loadEvents(sessionId)) : false;
   // 本地「前缀稳定性」：与上一回合的稳定前缀逐字节比对（provider 不报 cached_tokens 时的可靠判据）
   let prevHistory: unknown[] | undefined;
   let prefixStable: boolean | undefined;
@@ -259,6 +262,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     usage = lastUsage(loadEvents(id));
     prevHistory = undefined;
     prefixStable = undefined;
+    foldCount = 0;
+    summaryActive = !!lastSummary(loadEvents(id));
     push(dim(`  已回溯到 ${id}`), "");
     refresh();
   };
@@ -326,7 +331,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const tok = usage ? `${usage.prompt} tok` : `~${tokens.toFixed(0)} tok`;
       const pfx = prefixStable === undefined ? "前缀 —" : prefixStable ? "前缀 稳定" : "前缀 变化";
       const sid = sessionId.replace(/^bot-/, "").slice(0, 15);
-      const seg = `${sid} · ${busy ? state : "空闲"} · 上下文 ~${ctx}% · 缓存 ${cache} · ${pfx} · ${tok} · /resume 回溯`;
+      const extra = `${foldCount ? `折叠 ${foldCount} · ` : ""}${summaryActive ? "摘要 有 · " : ""}`;
+      const seg = `${sid} · ${busy ? state : "空闲"} · 上下文 ~${ctx}% · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
       return [truncateToWidth(` ${dim(`${seg} · esc 中断 · ctrl+c 退出`)}`, w)];
     },
     invalidate(): void {},
@@ -439,6 +445,26 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
         break;
       }
+      case "context": {
+        if (e.stage === "summarizing") {
+          state = "整理早期摘要";
+          push(dim("  ⟳ 上下文接近上限，正在压缩早期对话为摘要（原文保留在事件流）…"), "");
+        } else if (e.stage === "summarize_failed") {
+          push(dim("  · 摘要生成失败（本轮不压缩；原文仍在事件流，可 /resume 回溯）"), "");
+        } else {
+          foldCount = e.folded ?? 0;
+          if (foldCount) push(dim(`  · 已折叠 ${foldCount} 条旧工具输出（原文保留，可 /resume 回溯）`));
+        }
+        refresh();
+        break;
+      }
+      case "summary": {
+        summaryActive = true;
+        appendEvent(sessionId, { t: "note", at: new Date().toISOString(), text: e.text });
+        push(dim("  · 早期对话已压缩为摘要（prefix 变化一次后重新稳定）"), "");
+        refresh();
+        break;
+      }
       case "assistant": {
         appendEvent(sessionId, {
           t: "msg",
@@ -491,10 +517,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     if (!cfg) return;
     busy = true;
     state = "连接中";
-    // 每回合从事件流重建上下文：只追加、顺序稳定 → 前缀缓存友好（§13.2）
-    const history = messagesFrom(loadEvents(sessionId));
-    checkPrefix(history);
-    void runBotTask({ cfg, cwd, history, signal: abort.signal, onEvent });
+    // 每回合从事件流装配上下文：只追加、顺序稳定 → 前缀缓存友好（§13.2）
+    const events = loadEvents(sessionId);
+    checkPrefix(events.filter((e) => e.t === "msg"));
+    void runBotTask({ cfg, cwd, events, signal: abort.signal, onEvent });
   };
 
   editor.onSubmit = (text: string) => {
@@ -512,6 +538,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         usage = undefined;
         prevHistory = undefined;
         prefixStable = undefined;
+        foldCount = 0;
+        summaryActive = false;
         push(dim("  新会话已开始"), "");
         refresh();
       } else if (cmd === "help") {
