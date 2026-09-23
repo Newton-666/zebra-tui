@@ -187,6 +187,22 @@ class StreamText implements Component {
   invalidate(): void {}
 }
 
+/** 选择器块：提示行 + 列表一体（原位替换，不堆积；note 承载反馈/标题） */
+class PickerBlock implements Component {
+  note = "";
+  list: SelectList;
+  constructor(list: SelectList) {
+    this.list = list;
+  }
+  render(w: number): string[] {
+    const head = this.note ? fg("33", `  ${this.note}`) : dim("  回溯历史（↑↓ 恢复 · enter 确认 · d 删除 · esc 返回）");
+    return [head, ...this.list.render(w)];
+  }
+  invalidate(): void {
+    this.list.invalidate();
+  }
+}
+
 export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> {
   const cfg: BuilderConfig | undefined = loadBuilder();
   const terminal = new ProcessTerminal();
@@ -320,7 +336,15 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       this.list.invalidate();
     }
   }
-  const openSessionsPicker = (selectValue?: string): void => {
+  const removePickerBlock = (): void => {
+    const i = transcript.items.indexOf(pickerBlock as unknown as Component);
+    if (i >= 0) transcript.items.splice(i, 1);
+    picker = undefined;
+    pickerKind = undefined;
+    pickerBlock = undefined;
+  };
+
+  const openSessionsPicker = (atIndex = 0, note?: string): void => {
     const sessions = listBotSessions();
     const items = sessions.map((m) => {
       const msgs = loadEvents(m.id).filter((e) => e.t === "msg");
@@ -332,10 +356,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       };
     });
     const list = new SelectList(items, Math.min(items.length, 12), THEME);
-    let idx = selectValue ? items.findIndex((it) => it.value === selectValue) : -1;
-    if (idx < 0 && selectValue) idx = Math.min(selectValue === "__end" ? items.length - 1 : 0, items.length - 1); // 删除后自动跳到下一个
-    if (idx < 0) idx = 0;
-    list.setSelectedIndex(idx);
+    list.setSelectedIndex(Math.max(0, Math.min(atIndex, items.length - 1)));
     list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
     list.onSelect = (it: { value: string }) => {
       removePickerBlock();
@@ -344,6 +365,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     list.onCancel = () => removePickerBlock();
     picker = list;
     pickerKind = "sessions";
+    if (note) pickerBlock.note = note;
     pickerBlock = new PickerBlock(list);
     transcript.items.push(pickerBlock);
     refresh();
@@ -582,7 +604,31 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const cmd = body.slice(1).trim().toLowerCase();
       clearEditor();
       if (cmd === "resume" || cmd === "sessions") openSessionsPicker();
+      else if (cmd.startsWith("name")) {
+        const nm = body.slice(body.indexOf("name") + 4).trim();
+        if (!nm) {
+          push(dim(`  当前会话名：${sessionName ?? "（未命名）"}  用法：/name <名称>`), "");
+        } else {
+          const m = renameSession(sessionId, nm);
+          sessionName = m?.name;
+          if (m) push(dim(`  会话已命名为「${m.name}」（历史列表 /resume 里可见）`), "");
+          else push(fg("31", "  命名失败（会话元数据不可写）"), "");
+        }
+        refresh();
+      }
+      else if (cmd === "new") {
+        sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者", mode }).id;
+        transcript.items = [...pushIntro(cfg.model, cwd), ""];
+        usage = undefined;
+        prevHistory = undefined;
+        prefixStable = undefined;
+        foldCount = 0;
+        summaryActive = false;
+        push(dim("  新会话已开始"), "");
+        refresh();
+      }
       else if (cmd === "mode") {
+        removePickerBlock();
         const items = [
           { value: "readonly", label: "Read Only（只读）", description: "白名单通过；写类命令被拦。最安全，适合看代码 / 调研" },
           { value: "full", label: "Full access（完全访问）", description: "白名单直通；灰名单（建/改文件、git add·commit、构建测试）放行；删除类与覆盖已存在文件被黑名单拦截" },
@@ -673,6 +719,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
             return;
           }
           deleteArmed = undefined;
+          const all = listBotSessions();
+          const curIdx = Math.max(0, all.findIndex((m) => m.id === id)); // 删除前索引
           const r = trashSession(id);
           if (!r.ok) {
             pickerBlock.note = `删除失败：${r.error ?? "未知错误"}`;
@@ -684,7 +732,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
             sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
             transcript.items = [];
           }
-          openSessionsPicker(id); // 删除后自动落在下一个会话上 → 连续 d 连删
+          openSessionsPicker(curIdx, `已删除 ${id}（移入 .trash，可恢复）· 可继续删`); // 同索引 = 下一个会话
           return;
         }
         if (deleteArmed) {
