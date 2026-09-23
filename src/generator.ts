@@ -1,6 +1,6 @@
-// Krystal — 一句话建队：调用一次性 CLI（pi -p / hermes -z / codex exec / kimi -p）
-// 把用户的一句描述整理成结构化团队规格（队名 / 目标 / 协作协议 / 成员职责）
-import { execFile, execFileSync } from "node:child_process";
+// Krystal — 一句话建队：用平台搭建模型（builder，OpenAI 兼容）把一句描述整理成团队规格
+// 无静默回退：未配置平台模型时抛 BuilderNotConfigured，由向导引导去首页配置
+import { BuilderNotConfigured, chat, loadBuilder } from "./builder.ts";
 import type { MemberType } from "./types.ts";
 
 export interface TeamSpec {
@@ -11,45 +11,6 @@ export interface TeamSpec {
 }
 
 const VALID_TYPES: MemberType[] = ["pi", "hermes", "codex", "kimi"];
-
-/** 可用的生成器（按优先级探测） */
-export function pickGenerator(): { label: string; run: (prompt: string) => Promise<string> } | undefined {
-  // 顺序按「从 node 调用时的可靠性 + 延迟」排：hermes 稳、kimi 快、pi 需伪终端、codex 较慢
-  const candidates: { label: string; cmd: string; args: (p: string) => string[] }[] = [
-    { label: "kimi", cmd: "kimi", args: (p) => ["-p", p] },
-    { label: "hermes", cmd: "hermes", args: (p) => ["-z", p] },
-    // pi 的 print 模式在无终端管道下会等待终端查询 → 用 script 提供伪终端
-    { label: "pi", cmd: "script", args: (p) => ["-q", "/dev/null", "pi", "-p", "--no-tools", "--no-session", "--mode", "text", p] },
-    { label: "codex", cmd: "codex", args: (p) => ["exec", "--skip-git-repo-check", p] },
-  ];
-  for (const c of candidates) {
-    try {
-      const probe = c.cmd === "script" ? "pi" : c.cmd;
-      execFileSync("sh", ["-c", `command -v ${probe}`], { stdio: ["ignore", "ignore", "ignore"], timeout: 3000 });
-    } catch {
-      continue;
-    }
-    return {
-      label: c.label,
-      run: (prompt: string) =>
-        new Promise<string>((resolve, reject) => {
-          execFile(
-            c.cmd,
-            c.args(prompt),
-            {
-              encoding: "utf8",
-              timeout: 150000,
-              maxBuffer: 4 * 1024 * 1024,
-              // stdin 必须给 /dev/null：否则子进程读 stdin 等 EOF 会永久阻塞
-              stdio: ["ignore", "pipe", "ignore"],
-            },
-            (err, stdout) => (err ? reject(new Error(`${c.label} 生成失败：${err.message.split("\n")[0]}`)) : resolve(String(stdout))),
-          );
-        }),
-    };
-  }
-  return undefined;
-}
 
 const PROMPT_HEAD = `你是团队编排器。根据用户描述，输出下面 4 类行（纯文本，每行一条，不要解释、不要 markdown 围栏、不要在行内换行）：
 
@@ -125,15 +86,11 @@ export function parseLines(text: string): TeamSpec | undefined {
   return normalizeSpec({ teamName: teamName || "krystal-team", goal, protocol, members });
 }
 
-/** 生成团队规格（异步，TUI 不阻塞）；出错时抛出可读信息（由向导展示） */
+/** 生成团队规格（异步，TUI 不阻塞）；未配置平台模型 → BuilderNotConfigured（向导引导配置） */
 export async function generateTeamSpec(description: string): Promise<TeamSpec> {
-  const gen = pickGenerator();
-  if (!gen) throw new Error("找不到可用的生成器（需要 hermes / kimi / pi / codex 之一）");
-  const out = await gen.run(PROMPT_HEAD + description);
+  const cfg = loadBuilder();
+  if (!cfg) throw new BuilderNotConfigured();
+  const out = await chat(cfg, PROMPT_HEAD + description);
   const cleaned = out.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "");
   return parseLines(cleaned) ?? normalizeSpec(extractJson(cleaned));
-}
-
-export function generatorLabel(): string {
-  return pickGenerator()?.label ?? "（无）";
 }

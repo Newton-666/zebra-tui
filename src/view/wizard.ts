@@ -15,7 +15,8 @@ import { bold, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { DEFAULT_COMMANDS, MEMBER_COLORS, type Member, type MemberType, type TeamConfig } from "../types.ts";
 import { listSessions, newSessionId } from "../team.ts";
-import { generateTeamSpec, generatorLabel, type TeamSpec } from "../generator.ts";
+import { generateTeamSpec, type TeamSpec } from "../generator.ts";
+import { clearBuilder, loadBuilder, maskKey, saveBuilder, testBuilder, type BuilderConfig } from "../builder.ts";
 import { discoverModelGroups, withModel, type ModelGroup } from "../models.ts";
 
 const THEME = {
@@ -41,7 +42,12 @@ type Step =
   | "confirm"
   | "genInput"
   | "genLoading"
-  | "genConfirm";
+  | "genConfirm"
+  | "builderMenu"
+  | "builderUrl"
+  | "builderKey"
+  | "builderModel"
+  | "builderTesting";
 
 const TYPE_ITEMS: { value: MemberType; label: string; description: string }[] = [
   { value: "pi", label: "pi", description: "pi coding agent" },
@@ -89,6 +95,12 @@ class Wizard implements Component, Focusable {
   private spec: TeamSpec | undefined;
   private spinnerTimer: ReturnType<typeof setInterval> | undefined;
   private spinnerFrame = 0;
+
+  // 平台模型（搭建模型）配置用
+  private pendingGen = false; // 配置完成后要回到「一句话建队」
+  private builderAbort: AbortController | undefined;
+  private builderModel = ""; // genLoading 展示用
+  private builderDraft: Partial<BuilderConfig> = {};
 
   constructor(tui: TUI, cwd: string) {
     this.tui = tui;
@@ -155,10 +167,19 @@ class Wizard implements Component, Focusable {
     if (this.step !== "mode") out.push(truncateToWidth(dim(this.instr), width));
     if (this.step === "mode") out.push(dim(" 选择模式："));
     out.push(rule(width));
-    if (this.step === "genLoading") {
+    if (this.step === "genLoading" || this.step === "builderTesting") {
       const sp = SPINNER[this.spinnerFrame % SPINNER.length]!;
-      out.push(truncateToWidth(` ${fg("36", sp)} 正在用 ${bold(generatorLabel())} 整理你的描述…（通常 10-40 秒，esc 取消）`, width));
-      out.push(truncateToWidth(dim(` 描述：${this.genDesc}`), width));
+      if (this.step === "genLoading") {
+        out.push(truncateToWidth(` ${fg("36", sp)} 平台模型 ${bold(this.builderModel)} 整理中…（esc 取消）`, width));
+        out.push(truncateToWidth(dim(` 描述：${this.genDesc}`), width));
+      } else {
+        out.push(
+          truncateToWidth(
+            ` ${fg("36", sp)} 正在测试 ${bold(this.builderDraft.model ?? "")} @ ${this.builderDraft.baseUrl ?? ""}…（esc 取消）`,
+            width,
+          ),
+        );
+      }
     } else if (this.active) {
       if (this.step === "genConfirm" && this.spec) {
         out.push(...this.specLines());
@@ -183,6 +204,7 @@ class Wizard implements Component, Focusable {
   // ---------- 模式选择 ----------
   private showMode(): void {
     const sessions = listSessions();
+    const builderCfg = loadBuilder();
     const items = [
       { value: "new", label: "新建团队", description: "手动配置：人数 / 名字 / 类型 / 启动命令" },
       { value: "gen", label: "一句话建队", description: "用一句描述生成成员职责与协作协议（推荐）" },
@@ -191,6 +213,11 @@ class Wizard implements Component, Focusable {
         label: "历史群聊",
         description: sessions.length ? `${sessions.length} 个历史团队，恢复对话与画面` : "暂无历史团队",
       },
+      {
+        value: "builder",
+        label: "Platform model",
+        description: builderCfg ? `已配置 · ${builderCfg.model}` : "未配置——一句话建队需要它",
+      },
       { value: "quit", label: "退出" },
     ];
     const list = new SelectList(items, items.length, THEME);
@@ -198,6 +225,7 @@ class Wizard implements Component, Focusable {
       if (item.value === "new") this.showSize();
       else if (item.value === "gen") this.showGenInput();
       else if (item.value === "history") this.showChooser();
+      else if (item.value === "builder") this.showBuilder();
       else this.onSubmitResult?.({ action: "quit" });
     });
     list.onCancel = () => this.onSubmitResult?.({ action: "quit" });
@@ -244,6 +272,15 @@ class Wizard implements Component, Focusable {
   }
 
   private runGeneration(): void {
+    const cfg = loadBuilder();
+    if (!cfg) {
+      // 无静默回退：未配置平台模型 → 引导配置，完成后自动回到一句话建队
+      this.pendingGen = true;
+      this.showBuilder();
+      this.error = "未配置平台模型——一句话建队需要它，先配置吧（测试通过后自动回到这里）";
+      return;
+    }
+    this.builderModel = cfg.model;
     this.stopSpinner();
     this.step = "genLoading";
     this.instr = "生成中";
@@ -329,6 +366,117 @@ class Wizard implements Component, Focusable {
         role: m.role,
       })),
     };
+  }
+
+  // ---------- 平台模型（搭建模型）配置 ----------
+  private showBuilder(): void {
+    const cfg = loadBuilder();
+    const items = [
+      {
+        value: "edit",
+        label: cfg ? "重新配置" : "配置",
+        description: cfg
+          ? `${cfg.baseUrl} · ${maskKey(cfg.apiKey)} · ${cfg.model}`
+          : "Base URL / API Key / 模型名，测试通过后保存",
+      },
+      ...(cfg
+        ? [{ value: "clear", label: "清除配置", description: "回到未配置状态（一句话建队会要求先配置）" }]
+        : []),
+      { value: "__back", label: "返回" },
+    ];
+    const list = new SelectList(items, items.length, THEME);
+    list.onSelect = this.safe((item: { value: string }) => {
+      if (item.value === "edit") this.showBuilderUrl();
+      else if (item.value === "clear") {
+        clearBuilder();
+        this.showBuilder();
+        this.error = "已清除平台模型配置";
+      } else if (this.pendingGen) this.showGenInput();
+      else this.showMode();
+    });
+    list.onCancel = () => (this.pendingGen ? this.showGenInput() : this.showMode());
+    this.setActive(
+      list,
+      "builderMenu",
+      cfg ? "Platform model（平台搭建模型，与成员模型互不干预）" : "Platform model（未配置——一句话建队需要它）",
+    );
+  }
+
+  private showBuilderUrl(): void {
+    this.builderDraft = loadBuilder() ?? {};
+    const input = new Input();
+    if (this.builderDraft.baseUrl) input.setValue(this.builderDraft.baseUrl);
+    input.onSubmit = this.safe(() => {
+      const v = input.getValue().trim();
+      if (!v) return;
+      this.builderDraft.baseUrl = v;
+      this.showBuilderKey();
+    });
+    input.onEscape = () => this.showBuilder();
+    this.setActive(input, "builderUrl", "Base URL（OpenAI 兼容根地址，含 /v1，例：https://api.example.com/v1）");
+  }
+
+  private showBuilderKey(): void {
+    const input = new Input();
+    if (this.builderDraft.apiKey) input.setValue(this.builderDraft.apiKey);
+    input.onSubmit = this.safe(() => {
+      const v = input.getValue().trim();
+      if (!v) return;
+      this.builderDraft.apiKey = v;
+      this.showBuilderModel();
+    });
+    input.onEscape = () => this.showBuilderUrl();
+    this.setActive(input, "builderKey", "API Key（输入不回显打码，仅保存在本机 ~/.krystal/config.json）");
+  }
+
+  private showBuilderModel(): void {
+    const input = new Input();
+    if (this.builderDraft.model) input.setValue(this.builderDraft.model);
+    input.onSubmit = this.safe(() => {
+      const v = input.getValue().trim();
+      if (!v) return;
+      this.builderDraft.model = v;
+      this.testAndSave();
+    });
+    input.onEscape = () => this.showBuilderKey();
+    this.setActive(input, "builderModel", "模型 id（回车开始测试连接，通过后才保存）");
+  }
+
+  private testAndSave(): void {
+    const cfg = this.builderDraft as BuilderConfig;
+    if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+      this.showBuilder();
+      this.error = "三项都要填";
+      return;
+    }
+    this.stopSpinner();
+    this.step = "builderTesting";
+    this.instr = "测试连接";
+    this.error = "";
+    this.spinnerFrame = 0;
+    this.builderAbort = new AbortController();
+    this.spinnerTimer = setInterval(() => {
+      this.spinnerFrame++;
+      this.tui.requestRender();
+    }, 90);
+    this.spinnerTimer.unref?.();
+    this.tui.requestRender();
+    void testBuilder(cfg, this.builderAbort.signal)
+      .then(() => {
+        this.stopSpinner();
+        this.builderAbort = undefined;
+        saveBuilder(cfg);
+        const resumeGen = this.pendingGen;
+        this.pendingGen = false;
+        this.showBuilder();
+        this.error = `已保存，测试通过：${cfg.model}${resumeGen ? "——继续一句话建队吧" : ""}`;
+      })
+      .catch((e: unknown) => {
+        this.stopSpinner();
+        this.builderAbort = undefined;
+        this.showBuilder();
+        this.error = `测试未通过（未保存）：${e instanceof Error ? e.message : String(e)}`;
+      });
   }
 
   // ---------- 手动配置 ----------
@@ -541,6 +689,16 @@ class Wizard implements Component, Focusable {
         this.stopSpinner();
         this.showGenInput();
         this.error = "已取消（生成进程会在后台超时结束）";
+      }
+      return;
+    }
+    if (this.step === "builderTesting") {
+      if (matchesKey(data, "escape")) {
+        this.builderAbort?.abort();
+        this.builderAbort = undefined;
+        this.stopSpinner();
+        this.showBuilder();
+        this.error = "已取消测试";
       }
       return;
     }
