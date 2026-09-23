@@ -76,27 +76,50 @@ const BOT_THEME: MarkdownTheme = {
   underline: (t) => t,
 };
 
-class Transcript implements Component {
+export class Transcript implements Component {
   items: (string | Component)[] = [];
   lastWidth = 0;
+  // ── 性能（对齐 pi-tui 自建组件的缓存契约）：框架每帧的 renderCache 是新建的，跨帧缓存只能靠组件自己。
+  // 每项按（对象身份 + 版本号 + 宽度）缓存裁剪后的行：滚动/流式增量时全是缓存命中，不再每帧重排全量文本。
+  // 可变组件（StreamText.append / ToolBlock）在内容变化时自增 rev → 只有那一项重算。
+  private cache = new Map<object | string, { rev: number | string; w: number; lines: string[] }>();
+  private static revOf(it: string | Component): number | string {
+    if (typeof it === "string") return it;
+    return (it as { rev?: number }).rev ?? 0;
+  }
   render(w: number): string[] {
     this.lastWidth = w;
     const out: string[] = [];
     for (const it of this.items) {
-      const lines = typeof it === "string" ? [it] : it.render(w);
-      // 关键：任何来源的行都不允许超过宽度——Markdown 表格不折行，
-      // 超宽会让合成器写出屏幕边界 → 整屏错乱、输入框消失
-      for (const l of lines) out.push(truncateToWidth(l, w, ""));
+      const rev = Transcript.revOf(it);
+      const key = typeof it === "string" ? it : it;
+      let entry = this.cache.get(key);
+      if (!entry || entry.rev !== rev || entry.w !== w) {
+        const lines = typeof it === "string" ? [it] : it.render(w);
+        const clipped: string[] = [];
+        // 关键：任何来源的行都不允许超过宽度——Markdown 表格不折行，
+        // 超宽会让合成器写出屏幕边界 → 整屏错乱、输入框消失
+        for (const l of lines) clipped.push(truncateToWidth(l, w, ""));
+        entry = { rev, w, lines: clipped };
+        this.cache.set(key, entry);
+      }
+      out.push(...entry.lines);
     }
     return out;
   }
-  invalidate(): void {}
+  /** 项目被移出列表时丢掉它的缓存（防旧块常驻内存） */
+  forget(it: string | Component): void {
+    this.cache.delete(typeof it === "string" ? it : it);
+  }
+  invalidate(): void {
+    this.cache.clear();
+  }
 }
 
 /** 用户消息块：整页宽蓝底 + 上下留白（对齐 pi 的 Box(padX=1, padY=1) 观感）
  *  说明：对话区的 ScrollView 会裁掉「纯空白行」，故留白行末尾缀一个零宽字符（不可见但非空白，保住整行背景） */
 const ZWSP = "\u200b";
-class UserBlock implements Component {
+export class UserBlock implements Component {
   private text: string;
   constructor(text: string) {
     this.text = text;
@@ -126,9 +149,11 @@ const T_OUT = "\x1b[38;5;252m";
 const T_HINT = "\x1b[38;5;246m";
 const B_ON = "\x1b[1m";
 const B_OFF = "\x1b[22m";
-class ToolBlock implements Component {
+export class ToolBlock implements Component {
   name: string;
-  args: string;
+  /** 渲染版本号：内容变化时 +1（Transcript 缓存据此只重算这一项） */
+  rev = 0;
+  private _args: string;
   private state = "pending";
   private output: string[] = [];
   private note = "";
@@ -140,13 +165,21 @@ class ToolBlock implements Component {
     } catch {
       /* 原样 */
     }
-    this.args = preview.slice(0, 90);
+    this._args = preview.slice(0, 90);
+  }
+  get args(): string {
+    return this._args;
+  }
+  set args(v: string) {
+    this._args = v;
+    this.rev++;
   }
   setResult(ok: boolean, denied: boolean, output: string): void {
     this.state = denied ? "denied" : ok ? "ok" : "error";
     const lines = output.split("\n").filter((l) => l.trim() !== "");
     this.output = lines.slice(0, 6).map((l) => l.slice(0, 160));
     this.note = lines.length > 6 ? `… +${lines.length - 6} 行` : "";
+    this.rev++;
   }
   render(w: number): string[] {
     const inner = Math.max(12, w - 4);
@@ -167,8 +200,10 @@ class ToolBlock implements Component {
 }
 
 /** 流式文本块：多行折行渲染，原地增长（思考/回答共用）——pi 的思考是「一段」而不是一行 */
-class StreamText implements Component {
+export class StreamText implements Component {
   text = "";
+  /** 渲染版本号：每追加一段增量 +1（Transcript 缓存据此只重算这一项） */
+  rev = 0;
   private prefix: string;
   private style: (s: string) => string;
   private indent: string;
@@ -179,6 +214,7 @@ class StreamText implements Component {
   }
   append(delta: string): void {
     this.text += delta;
+    this.rev++;
   }
   render(w: number): string[] {
     const rows = wrapTextWithAnsi(this.text.replace(/\s+$/, ""), Math.max(8, w - 4));
@@ -408,6 +444,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   const resumeSession = (id: string) => {
     sessionId = id;
     transcript.items = [];
+    transcript.invalidate();
     rebuild(id);
     usage = lastUsage(loadEvents(id));
     prevHistory = undefined;
@@ -433,6 +470,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
       setSessionMode(sessionId, mode);
       transcript.items = [...pushIntro(cfg?.model ?? "", cwd), ""];
+      transcript.invalidate();
       usage = undefined;
       prevHistory = undefined;
       prefixStable = undefined;
@@ -703,6 +741,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         if (e.text.trim()) {
           const idx = streamed ? transcript.items.indexOf(streamed) : -1;
           if (idx >= 0) transcript.items.splice(idx, 1);
+          if (streamed) transcript.forget(streamed); // 释放旧流式块的缓存（其内容由 Markdown 块接管）
           push(new Markdown(e.text, 1, 0, BOT_THEME));
           push("");
         }
@@ -755,6 +794,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       else if (cmd === "new") {
         sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者", mode }).id;
         transcript.items = [...pushIntro(cfg.model, cwd), ""];
+        transcript.invalidate();
         usage = undefined;
         prevHistory = undefined;
         prefixStable = undefined;
