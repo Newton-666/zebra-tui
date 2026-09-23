@@ -4,7 +4,7 @@
 // 来源：owner 提供的 Rose.png，程序化点阵转换（块均值 + Floyd–Steinberg 抖动 + 裁剪）。
 // 生成脚本见 docs（块均值降采样 → 背景减法 → 抖动 → Braille 码位）。
 import { BLUE_LIGHT, bold, chip, dim, fg } from "./ansi.ts";
-import { visibleWidth, wrapTextWithAnsi } from "../../deps/pi-tui/dist/index.js";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../../deps/pi-tui/dist/index.js";
 import { KRYSTAL_GRADIENT, LOGO_ROWS } from "./logo.ts";
 
 /** 完整画像（72×37，点阵 144×148） */
@@ -100,6 +100,12 @@ export interface PortraitInfo {
 }
 
 /** 逐行渐变（与 logo 同源：51→45→39→33→27→26，循环铺满行数） */
+const centerIn = (t: string, w: number) => {
+  const pad = Math.max(0, w - visibleWidth(t));
+  const left = pad >> 1;
+  return " ".repeat(left) + t + " ".repeat(pad - left);
+};
+
 const rowColor = (i: number) => KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!;
 const TAGLINE = "棱镜之间，诸神显形";
 
@@ -120,31 +126,35 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
 
   if (width < 34) return [` ${bold(info.name)} ${dim("· 原生成员")}`];
 
-  // 右侧介绍列：名字 / 标语 / 简介 / 命令 / 工具 / 会话信息卡（写多）
+  // 右侧介绍列（hermes Panel 的形状：section 标题 + 「标签 padEnd(20) 灰 + 值」行）
   const rightCol = (rw: number): string[] => {
-    const w = Math.max(20, rw);
-    const para = (t: string) => wrapTextWithAnsi(t, w).map((l) => dim(l));
-    const kv = (k: string, v: string) => `  ${chip(` ${k} `, "48;5;24", "38;5;255")} ${v.length > w - 8 ? `${v.slice(0, Math.max(4, w - 9))}…` : v}`;
-    return [
-      bold(info.name),
-      fg(BLUE_LIGHT, TAGLINE),
-      "",
-      ...para("Krystal 平台的原生成员：与团队共用一套协议（身份 / 派工 / 白板 / 汇报），"),
-      ...para("可查文件、跑只读命令、记住跨会话的事实。"),
-      "",
-      `  ${chip(" 命令 ", "48;5;25", "38;5;231")} ${dim("/resume 回溯 · /memory 记忆图 · /new 新会话 · /help")}`,
-      `  ${chip(" 工具 ", "48;5;25", "38;5;231")} ${dim("list_dir · read_file · run_command · memory")}`,
-      "",
-      kv("模型", info.model),
-      kv("档位", info.tier),
-      kv("目录", info.cwd),
-      kv("会话", info.sessionId),
-      kv("记忆", `${info.memories ?? 0} 条事实`),
-    ];
+    const w = Math.max(24, rw);
+    const rows: string[] = [];
+    rows.push(...wrapTextWithAnsi("Krystal 平台的原生成员：与团队共用一套协议（身份 / 派工 / 白板 / 汇报），可查文件、跑只读命令、记住跨会话的事实。", w).map((l) => dim(l)));
+    rows.push("");
+    rows.push(bold(fg(BLUE_LIGHT, "命令")));
+    rows.push(dim("/resume 回溯历史 · /memory 记忆图 · /new 新会话 · /help"));
+    rows.push("");
+    rows.push(bold(fg(BLUE_LIGHT, "工具")));
+    rows.push(dim("list_dir · read_file · run_command · memory"));
+    rows.push("");
+    rows.push(bold(fg(BLUE_LIGHT, "会话")));
+    for (const [k, v] of [
+      ["模型", info.model],
+      ["档位", info.tier],
+      ["目录", info.cwd],
+      ["会话", info.sessionId],
+      ["记忆", `${info.memories ?? 0} 条事实`],
+    ] as [string, string][]) {
+      const room = Math.max(6, w - 20);
+      rows.push(dim(k.padEnd(20)) + (v.length > room ? `${v.slice(0, room - 1)}…` : v));
+    }
+    // 出口统一按列宽截断（防止固定长行溢出 → 框线错位）
+    return rows.map((r) => truncateToWidth(r, w, "…"));
   };
 
   const logo = LOGO_ROWS.map((r, i) => fg(KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!, r));
-  const out: string[] = [...logo];
+  const out: string[] = width >= logoW + 2 ? [...logo] : [` ${bold(info.name)} ${dim("· 原生成员")}`];
 
   // 在「宽」允许时优先并排：玫瑰在左、介绍在右（放得下完整画像就用完整）
   // 并排时的画像档位：默认迷你；宽裕（还多出 40 列）才升到小图/完整
@@ -154,18 +164,60 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
   const useMini = width >= miniW + GAP + RIGHT_MIN;
   if (useFull || useSmall || useMini) {
     const art = useFull ? ROSE_ART : useSmall ? ROSE_ART_SMALL : ROSE_ART_MINI;
-    const inner = wOf(art);
-    const label = "画像";
-    const top = dim("╭─") + dim(` ${label} `) + dim("─".repeat(Math.max(0, inner - label.length)) + "╮");
-    const bottom = dim("╰" + "─".repeat(inner) + "╯");
-    const framed = [top, ...art.map((r, i) => dim("│") + fg(rowColor(i), r.padEnd(inner)) + dim("│")), bottom];
-    const right = rightCol(width - inner - 2 - GAP);
-    out.push("");
-    for (let i = 0; i < Math.max(framed.length, right.length); i++) {
-      const left = framed[i] ?? " ".repeat(inner + 2);
-      const pad = Math.max(0, inner + 2 - visibleWidth(left));
-      out.push(`${left}${" ".repeat(pad + GAP)}${right[i] ?? ""}`);
+    const artW = wOf(art);
+    const PAD_X = 2;
+    const PAD_Y = 1;
+    const BORDER = 2; // 左右各一条框线
+    // 宽度：先给右列理想宽度，再按终端宽度收缩；放不下就退化
+    const avail = width - BORDER - PAD_X * 2;
+    let rightW = Math.min(58, Math.max(40, avail - artW - GAP));
+    if (artW + GAP + rightW > avail) rightW = avail - artW - GAP;
+    if (rightW < 28) return stacked(); // 右列太窄 → 上下排
+    const innerW = artW + GAP + rightW;
+
+    const right = rightCol(rightW);
+    const rows: string[] = [];
+    rows.push(centerIn(bold(info.name), innerW));
+    rows.push(centerIn(fg(BLUE_LIGHT, TAGLINE), innerW));
+    rows.push("");
+    for (let i = 0; i < Math.max(art.length, right.length); i++) {
+      const left = art[i] ? fg(rowColor(i), art[i]!.padEnd(artW)) : " ".repeat(artW);
+      const r = truncateToWidth(right[i] ?? "", rightW, "…");
+      rows.push(left + " ".repeat(GAP) + r + " ".repeat(Math.max(0, rightW - visibleWidth(r))));
     }
+
+    const row = (t: string) => {
+      const bodyText = truncateToWidth(t, innerW, "…");
+      return dim("│") + " ".repeat(PAD_X) + bodyText + " ".repeat(Math.max(0, innerW - visibleWidth(bodyText)) + PAD_X) + dim("│");
+    };
+    const rule = (l: string, r: string) => dim(l + "─".repeat(innerW + PAD_X * 2) + r);
+    out.push("");
+    out.push(rule("╭", "╮"));
+    for (let i = 0; i < PAD_Y; i++) out.push(row(""));
+    for (const t of rows) out.push(row(t));
+    for (let i = 0; i < PAD_Y; i++) out.push(row(""));
+    out.push(rule("╰", "╯"));
+    return out;
+  }
+
+  function stacked(): string[] {
+    const logoH = width >= logoW + 2 ? LOGO_ROWS.length : 1;
+    const fitsFull2 = width >= fullW && height >= logoH + ROSE_ART.length + 7;
+    const fitsSmall2 = width >= smallW && height >= logoH + ROSE_ART_SMALL.length + 7;
+    if (fitsFull2 || fitsSmall2 || width >= miniW) {
+      const art = fitsFull2 ? ROSE_ART : fitsSmall2 ? ROSE_ART_SMALL : ROSE_ART_MINI;
+      out.push("");
+      for (let i = 0; i < art.length; i++) out.push(fg(rowColor(i), art[i]!));
+      out.push("");
+      out.push(...rightCol(width));
+      return out;
+    }
+    const inner = Math.max(10, width - 4);
+    out.push(dim("╭" + "─".repeat(inner) + "╮"));
+    out.push(`${dim("│")} ${bold(fg(BLUE_LIGHT, info.name))} ${dim(`· ${TAGLINE}`)}`.padEnd(inner + 2) + dim("│"));
+    out.push(dim("╰" + "─".repeat(inner) + "╯"));
+    out.push("");
+    out.push(...rightCol(width));
     return out;
   }
 
