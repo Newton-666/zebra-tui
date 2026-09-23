@@ -80,6 +80,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
   let state = cfg ? "空闲" : "未配置";
   let tokens = 0;
   let streamIdx = -1; // 正在流动的那一行
+  let streamKind: "thinking" | "text" | null = null;
   let streamBuf = "";
   const abort = new AbortController();
   const history: { role: string; content?: string | null; tool_calls?: unknown[]; tool_call_id?: string }[] = [];
@@ -140,19 +141,22 @@ export async function runBotFlow(cwd: string): Promise<void> {
   const closeStream = () => {
     streamIdx = -1;
     streamBuf = "";
+    streamKind = null;
   };
 
   const onEvent = (e: BotEvent) => {
     switch (e.type) {
       case "thinking":
         state = "思考中";
-        if (streamIdx < 0 || !transcript.lines[streamIdx]!.startsWith(dim("· "))) beginStream(dim("· "));
+        if (streamKind !== "thinking") beginStream(dim("· ")); // 显式类型：不再嗅探行内容
+        streamKind = "thinking";
         tokens += e.delta.length / 4;
         streamTo(e.delta, (b) => dim("· thinking " + b.replace(/\s+/g, " ")));
         break;
       case "text":
         state = "回答中";
-        if (streamIdx < 0 || transcript.lines[streamIdx]!.startsWith(dim("· "))) beginStream("");
+        if (streamKind !== "text") beginStream("");
+        streamKind = "text";
         tokens += e.delta.length / 4;
         streamTo(e.delta, (b) => " " + b);
         break;
