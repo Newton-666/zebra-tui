@@ -20,7 +20,8 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
-import { importMirror, renderGraph } from "../memory.ts";
+import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts";
+import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
   contextWindow,
@@ -255,6 +256,20 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     }
   };
   if (resumed) rebuild(sessionId);
+  else {
+    // 开场画像（hermes 式 Braille 点阵）：作为滚动流的第一条 → 一用起来就自然滚走
+    transcript.items.push(
+      ...renderPortrait(tui.terminal?.columns ?? 80, tui.terminal?.rows ?? 24, {
+        name: "Krystal Bot",
+        model: cfg?.model ?? "（未配置）",
+        tier: "阅读者",
+        cwd,
+        sessionId: sessionId.replace(/^bot-/, ""),
+        memories: activeFacts(loadFacts()).length,
+      }),
+      "",
+    );
+  }
   /** 回溯历史（/resume）：清空对话区并重放所选会话 */
   const resumeSession = (id: string) => {
     sessionId = id;
@@ -535,7 +550,17 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       if (cmd === "resume" || cmd === "sessions") openPicker();
       else if (cmd === "new") {
         sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者" }).id;
-        transcript.items = [];
+        transcript.items = [
+          ...renderPortrait(tui.terminal?.columns ?? 80, tui.terminal?.rows ?? 24, {
+            name: "Krystal Bot",
+            model: cfg.model,
+            tier: "阅读者",
+            cwd,
+            sessionId: sessionId.replace(/^bot-/, ""),
+            memories: activeFacts(loadFacts()).length,
+          }),
+          "",
+        ];
         usage = undefined;
         prevHistory = undefined;
         prefixStable = undefined;
@@ -614,7 +639,6 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   tui.setLayoutRoot(
     new VStack([
-      { component: headerComp, basis: "auto" },
       { component: scroll, basis: 0, grow: 1, minSize: 1 },
       { component: gapComp, basis: 1 },
       { component: statusComp, basis: "auto" },
