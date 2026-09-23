@@ -72,7 +72,10 @@ class UserBlock implements Component {
   }
   render(w: number): string[] {
     const inner = Math.max(8, w - 6);
-    return wrapTextWithAnsi(this.text, inner).map((r) => chip(" " + r + " ", "48;5;24", "38;5;255"));
+    return wrapTextWithAnsi(this.text, inner).map((r) => {
+      const padTo = Math.max(0, inner - visibleWidth(r));
+      return chip(" " + r + " ".repeat(padTo) + " ", "48;5;24", "38;5;255");
+    });
   }
   invalidate(): void {}
 }
@@ -159,6 +162,11 @@ export async function runBotFlow(cwd: string): Promise<void> {
     streamBuf = "";
     streamKind = null;
   };
+  /** 分段之间留一空行（pi 的做法：思考/工具/回答 各自成段） */
+  const ensureGap = () => {
+    const last = transcript.items[transcript.items.length - 1];
+    if (transcript.items.length > 0 && last !== "") push("");
+  };
 
   const onEvent = (e: BotEvent) => {
     switch (e.type) {
@@ -171,7 +179,10 @@ export async function runBotFlow(cwd: string): Promise<void> {
         break;
       case "text":
         state = "回答中";
-        if (streamKind !== "text") beginStream("");
+        if (streamKind !== "text") {
+          ensureGap(); // 与上面的思考/工具留出距离
+          beginStream("");
+        }
         streamKind = "text";
         tokens += e.delta.length / 4;
         streamTo(e.delta, (b) => " " + b);
@@ -179,6 +190,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
       case "tool_start": {
         closeStream();
         state = "工具 " + e.name;
+        ensureGap();
         tokens += e.args.length / 4;
         let argsPreview = e.args;
         try {
