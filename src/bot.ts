@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
-import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
+import { assembleContext, summarize, withSystem } from "./context.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
 
 const execAsync = promisify(exec);
@@ -274,16 +274,6 @@ export async function runBotTask(opts: {
     }
   }
   if (asm.folded) onEvent({ type: "context", stage: "folding", folded: asm.folded });
-  if (process.env.KRYSTAL_CONTEXT_DEBUG) {
-    // 临时诊断：装配决策（不参与业务逻辑）
-    try {
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        "/tmp/kb-ctx.log",
-        `win=${win} foldAt=${foldAt} summarizeAt=${summarizeAt} est=${estimateTokens([{ role: "system", content: system }, ...asm.messages])} toSum=${asm.toSummarize?.length ?? 0} folded=${asm.folded} usedSummary=${asm.usedSummary}\n`,
-      );
-    } catch {}
-  }
   const messages: unknown[] = withSystem(system, asm);
   try {
     for (let turn = 0; turn < maxTurns; turn++) {
