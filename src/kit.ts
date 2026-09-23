@@ -193,21 +193,24 @@ switch (cmd) {
 }
 `;
 
-/** 短身份（每次进群注入，一两句话，省 token） */
+/** 短身份（每次进群注入，一两句话，省 token）
+ *  关键：必须写明「这是背景，不是任务」——否则 agent 会把目标当成工单立刻开工 */
 export function identityText(config: TeamConfig, memberId: string): string {
   const me = config.members.find((m) => m.id === memberId)!;
   const others = config.members.filter((m) => m.id !== memberId).map((m) => m.name);
-  const who = `[身份] 你是团队「${config.name}」的成员「${me.name}」`;
+  const who = `[身份·背景信息，不是任务] 你是团队「${config.name}」的成员「${me.name}」`;
   const job = me.role ? `。你的职责：${me.role}` : "";
+  const goal = config.goal ? `。团队目标（背景，等派工后才执行）：${config.goal}` : "";
   const mate = others.length ? `。队友：${others.join("、")}` : "";
   const tools = `。协作：krystal roster / krystal send <队友> <消息> / krystal board`;
-  return who + job + mate + tools;
+  const idle = "。收到后只回复一句「已就绪」即可：不要开始任何工作（不改文件、不做探查、不跑命令）；未派工 = 零动作，等人类在 Krystal 里派工。";
+  return who + job + goal + mate + tools + idle;
 }
 
 /** 职责后续修改时的精简更新（避免同一身份在成员上下文里重复出现两份） */
 export function identityUpdateText(config: TeamConfig, memberId: string): string {
   const me = config.members.find((m) => m.id === memberId)!;
-  return `[身份更新] 你的职责改为：${me.role ?? "（无）"}。以此为准，之前那条身份里的职责作废；队友与协作方式不变。`;
+  return `[身份更新·背景信息] 你的职责改为：${me.role ?? "（无）"}。以此为准，之前那条身份里的职责作废；队友与协作方式不变。仍未派工，请不要开始工作。`;
 }
 
 export function briefText(config: TeamConfig, memberId: string): string {
@@ -247,6 +250,8 @@ export function ensureKit(config: TeamConfig): void {
   const lines: string[] = [
     `# ${config.name} — 团队简报`,
     ``,
+    `> 这是**背景信息，不是任务**。未派工 = 零动作（不改文件、不做探查）；等人类派工后按协议执行。`,
+    ``,
     ...(config.goal ? [`**团队目标**：${config.goal}`, ``] : []),
     `本团队由 Krystal 编排，共 ${config.members.length} 名成员（含职责）：`,
     ...config.members.map((m) => `- **${m.name}**（${m.type}）${m.role ? `— ${m.role}` : m.command ? `— \`${m.command}\`` : ""}`),
@@ -272,6 +277,7 @@ export function ensureKit(config: TeamConfig): void {
     `- **结论写白板**，不要把长内容在会话间来回搬运`,
     `- 频率保护：同一对队友 60 秒内互发超过 3 条（或全局 6 条）会被自动阻止`,
     `- 无实质新信息时保持安静，等人类派工`,
+    `- **不要修改 Krystal 自身的源码/仓库**：对 Krystal 的改进请写白板或 send 给人类，由人类落地（避免与助手互相覆盖）`,
     ``,
     `工作目录：\`${config.cwd}\``,
     `引擎会话：\`${config.tmuxSession}\``,

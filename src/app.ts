@@ -1,3 +1,4 @@
+import fs from "node:fs";
 // zebra — main app: header / team grid / status / editor
 import path from "node:path";
 import {
@@ -225,12 +226,19 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   const openModelPicker = (memberName?: string) => {
     const picker = new ModelPicker(config.members, memberName);
     let handle: { hide: () => void } | undefined;
-    picker.onPick = (m, model) => {
+    const close = () => {
+      overlayKeys = undefined;
       handle?.hide();
+    };
+    picker.onPick = (m, model) => {
+      close();
       switchModel(m, model);
     };
-    picker.onCancel = () => handle?.hide();
-    handle = tui.showOverlay(picker, { width: 68, maxHeight: "80%", anchor: "center", margin: 2 });
+    picker.onCancel = close;
+    handle = tui.showOverlay(picker, { width: 74, maxHeight: "80%", anchor: "center", margin: 2 });
+    handle.focus?.();
+    // pi-tui 的 overlay 自动聚焦在本组合下不生效 → 全局监听显式转发按键
+    overlayKeys = (d: string) => picker.handleInput(d);
     lastAction = "模型选择：↑↓ 选择 · enter 确认 · esc 取消";
     renderStatus();
   };
@@ -267,7 +275,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     if (trimmed.startsWith(":")) {
       // 已知命令处理；未知命令只提示、绝不广播给成员
       const word = trimmed.split(/\s+/)[0]!;
-      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":team", ":help", ":h"];
+      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":go", ":team", ":help", ":h"];
       if (!known.includes(word) && !known.some((k) => word.startsWith(k))) {
         lastAction = `未知命令 ${word}（${COMMAND_HELP}）`;
         renderStatus();
@@ -381,6 +389,19 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         return;
       }
       switchModel(m, modelArg);
+      return;
+    }
+    if (trimmed === ":go" || trimmed.startsWith(":go ")) {
+      const task = trimmed.slice(3).trim();
+      const body = task || (config.goal ? `团队目标：${config.goal}` : "（未填写目标）");
+      const msg =
+        `[派工] 开始工作。${body}。` +
+        `按团队协议执行：产出带 文件:行号；结论写白板（krystal board <内容>）；` +
+        `需要队友配合用 krystal send <队友> <消息>；需要人类决策的事直接说明。`;
+      const targets = lockedTo ? config.members.filter((m) => m.id === lockedTo) : [...config.members];
+      dispatch(targets.length ? targets : [...config.members], msg);
+      lastAction = `已派工（${targets.map((t) => t.name).join(",") || "全体"}）：${truncateToWidth(body, 40, "…")}`;
+      renderStatus();
       return;
     }
     if (trimmed === ":team") {
@@ -565,6 +586,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
 
   // --- 分隔线拖拽（SGR 鼠标）：TuiAltScreen 的内部监听器会抢先消费鼠标事件，
   // 所以必须把拖拽监听器插到 inputListeners 队首才能看到 SGR 序列。
+  let overlayKeys: ((data: string) => void) | undefined; // 弹窗打开时的按键接收器
   let dragging = -1;
   /** 清掉 alt-screen 可能残留的文本选区状态（拖拽分隔线后防高亮残留） */
   const clearAltScreenSelection = () => {
@@ -584,6 +606,11 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   };
   const SGR = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
   const mouseHandler = (data: string): { consume?: boolean } | undefined => {
+    if (overlayKeys) {
+      try { fs.appendFileSync("/tmp/ok.log", "forward " + JSON.stringify(data) + "\n"); } catch {}
+      overlayKeys(data); // 弹窗优先接收所有按键
+      return { consume: true };
+    }
     const m = SGR.exec(data);
     if (!m) return undefined;
     const button = Number(m[1]);

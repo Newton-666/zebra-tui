@@ -80,9 +80,10 @@ class CellBottom implements Component {
   }
 }
 
-/** 快照累积：末帧原地更新（状态条抖动），差异大才追加新帧（可回滚的历史） */
-const MAX_FRAMES = 60;
-const FRAME_DIFF_THRESHOLD = 2;
+/** 每格保留的历史行数上限 */
+const MAX_LOG_LINES = 800;
+/** 历史与「当前画面」之间的分隔标记 */
+const FRAME_SEPARATOR = "\x1b[2m····· 当前画面 ·····\x1b[22m";
 
 export class AgentCell {
   readonly root: VStack;
@@ -90,12 +91,18 @@ export class AgentCell {
   private tail: Tail;
   readonly scrollView: ScrollView;
   private lines: string[] = [];
-  private frames: string[][] = [];
+  private log: string[] = [];   // 已滚出屏幕的历史行（连续流水）
+  private last: string[] = [];  // 最近一次画面
 
   constructor(member: Member) {
     this.top = new CellTop(member);
     this.tail = new Tail();
-    this.scrollView = new ScrollView(this.tail, { follow: "end", scrollbar: "auto" });
+    this.scrollView = new ScrollView(this.tail, {
+      follow: "end",
+      scrollbar: "auto",
+      // 关键：chain 会把滚到头的剩余量传给 primary（第一格）→ 表现为「滚一个，别的也动」
+      overscroll: "contain",
+    });
     this.root = new VStack();
     this.root.addChild(this.top);
     this.root.addChild(this.scrollView, { basis: 0, grow: 1, minSize: 1 });
@@ -111,25 +118,46 @@ export class AgentCell {
     return kept.slice(start);
   }
 
-  private accumulate(frame: string[]): void {
-    const last = this.frames[this.frames.length - 1];
-    if (!last) {
-      this.frames.push(frame);
-      return;
+  /** 比对前后两屏：把「已被顶掉」的行追加进历史流水（只保留一份当前画面，不再叠整帧） */
+  private appendVanished(prev: string[], next: string[]): void {
+    // 找出 prev 整体上移了多少行（prev[s..] == next[0..]）→ 前 s 行是被顶掉的历史
+    let shift = -1;
+    for (let s = 0; s < prev.length; s++) {
+      const n = prev.length - s;
+      if (n === 0 || n > next.length) continue;
+      let ok = true;
+      for (let i = 0; i < n; i++) {
+        if (prev[s + i] !== next[i]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        shift = s;
+        break;
+      }
     }
-    // 统计差异行数；差异小（状态条/计时器抖动）→ 原地替换末帧，不增长历史
-    let diff = Math.abs(last.length - frame.length);
-    const n = Math.min(last.length, frame.length);
-    for (let i = 0; i < n; i++) if (last[i] !== frame[i]) diff++;
-    if (diff <= FRAME_DIFF_THRESHOLD) this.frames[this.frames.length - 1] = frame;
-    else this.frames.push(frame);
-    if (this.frames.length > MAX_FRAMES) this.frames.splice(0, this.frames.length - MAX_FRAMES);
+    // shift>0：顶掉了 s 行；shift==0：画面原地更新；-1：整屏换掉 → 旧屏全部入历史
+    const gone = shift > 0 ? prev.slice(0, shift) : shift === 0 ? [] : prev;
+    for (const line of gone) {
+      if (!line.trim()) continue;
+      if (this.log[this.log.length - 1] === line) continue;
+      this.log.push(line);
+    }
+    if (this.log.length > MAX_LOG_LINES) this.log.splice(0, this.log.length - MAX_LOG_LINES);
   }
 
   setScreen(lines: string[], alive: boolean, active: boolean): void {
     this.lines = lines.slice(-TAIL_KEEP);
     this.top.set(alive, active);
-    this.accumulate(AgentCell.normalize(this.lines));
-    this.tail.set(this.frames.flat());
+    const frame = AgentCell.normalize(this.lines);
+    if (this.last.length === 0) {
+      this.last = frame;
+    } else {
+      this.appendVanished(this.last, frame);
+      this.last = frame;
+    }
+    const body = this.log.length ? [...this.log, FRAME_SEPARATOR, ...this.last] : [...this.last];
+    this.tail.set(body);
   }
 }
