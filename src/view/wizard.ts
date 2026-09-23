@@ -16,6 +16,7 @@ import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { DEFAULT_COMMANDS, MEMBER_COLORS, type Member, type MemberType, type TeamConfig } from "../types.ts";
 import { listSessions, newSessionId } from "../team.ts";
 import { generateTeamSpec, generatorLabel, type TeamSpec } from "../generator.ts";
+import { discoverModelGroups, withModel, type ModelGroup } from "../models.ts";
 
 const THEME = {
   selectedPrefix: (t: string) => fg("36", t),
@@ -375,7 +376,8 @@ class Wizard implements Component, Focusable {
       this.members[i]!.command = DEFAULT_COMMANDS[type]!.command;
       this.members[i]!.resumeCommand = DEFAULT_COMMANDS[type]!.resume;
       this.members[i]!.color = MEMBER_COLORS[type];
-      this.showIdentity(i);
+      if (type === "custom") this.showIdentity(i);
+      else this.showModelProvider(i);
     });
     list.onCancel = () => this.showName(i);
     this.setActive(list, "type", `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 类型`);
@@ -393,6 +395,70 @@ class Wizard implements Component, Focusable {
     this.setActive(input, "cmd", `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 启动命令`);
   }
 
+  /** 模型来源（按各 agent 自己的配置分组） */
+  private showModelProvider(i: number): void {
+    const type = this.members[i]!.type!;
+    const groups = discoverModelGroups(type);
+    const items = [
+      { value: "__none", label: "默认（不指定模型）", description: `跟随 ${type} 自身配置` },
+      ...groups.map((g, gi) => ({
+        value: `g${gi}`,
+        label: g.group,
+        description: g.models.length ? `${g.models.length} 个模型 · 例：${g.models[0]!.value}` : "",
+      })),
+      { value: "__custom", label: "自定义…", description: "手输模型 id" },
+      { value: "__back", label: "返回" },
+    ];
+    const list = new SelectList(items, Math.min(items.length, 14), THEME);
+    list.onSelect = this.safe((item: { value: string }) => {
+      if (item.value === "__none") {
+        delete this.members[i]!.model;
+        this.showIdentity(i);
+      } else if (item.value === "__custom") {
+        this.showModelInput(i);
+      } else if (item.value === "__back") {
+        this.showType(i);
+      } else {
+        const gi = Number(item.value.slice(1));
+        this.showModelPick(i, groups[gi]!);
+      }
+    });
+    list.onCancel = () => this.showType(i);
+    this.setActive(
+      list,
+      "modelProvider",
+      `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 模型来源（来自 ${type} 的配置）`,
+    );
+  }
+
+  private showModelPick(i: number, group: ModelGroup): void {
+    const items = [
+      ...group.models.map((m) => ({ value: m.value, label: m.label, description: m.hint ?? "" })),
+      { value: "__back", label: "返回" },
+    ];
+    const list = new SelectList(items, Math.min(items.length, 14), THEME);
+    list.onSelect = this.safe((item: { value: string }) => {
+      if (item.value === "__back") this.showModelProvider(i);
+      else {
+        this.members[i]!.model = item.value;
+        this.showIdentity(i);
+      }
+    });
+    list.onCancel = () => this.showModelProvider(i);
+    this.setActive(list, "model", `成员 ${i + 1}/${this.size} (${this.members[i]!.name}) — 模型 · ${group.group}`);
+  }
+
+  private showModelInput(i: number): void {
+    const input = new Input();
+    input.onSubmit = this.safe(() => {
+      const m = input.getValue().trim();
+      if (m) this.members[i]!.model = m;
+      this.showIdentity(i);
+    });
+    input.onEscape = () => this.showModelProvider(i);
+    this.setActive(input, "modelInput", `成员 ${i + 1}/${this.size} — 输入模型 id（回车确认）`);
+  }
+
   /** 逐个成员输入一句话身份/职责（可回车跳过）——持久化到 team.json，每次进群都会注入 */
   private showIdentity(i: number): void {
     const input = new Input();
@@ -402,7 +468,7 @@ class Wizard implements Component, Focusable {
       if (i + 1 < this.size) this.showName(i + 1);
       else this.showManualConfirm();
     });
-    input.onEscape = this.safe(() => this.showType(i));
+    input.onEscape = this.safe(() => (this.members[i]!.type === "custom" ? this.showCmd(i) : this.showModelProvider(i)));
     this.setActive(
       input,
       "identity",
@@ -415,7 +481,9 @@ class Wizard implements Component, Focusable {
     const out: string[] = [];
     for (const m of this.members) {
       const c = m.color ?? "36";
-      out.push(`   ${fg(c, (m.name ?? "").padEnd(12))} ${dim((m.type ?? "").padEnd(7))} ${dim(m.command ?? "")}`);
+      const cmd = withModel(m.command ?? "", m.type ?? "custom", m.model);
+      out.push(`   ${fg(c, (m.name ?? "").padEnd(12))} ${dim((m.type ?? "").padEnd(7))} ${dim(cmd)}`);
+      if (m.model) out.push(`     ${dim("模型")} ${m.model}`);
       if (m.role) out.push(`     ${dim("职责")} ${truncateToWidth(m.role, 96, "…")}`);
     }
     return out;
@@ -452,10 +520,11 @@ class Wizard implements Component, Focusable {
         id: m.id!,
         name: m.name!,
         type: m.type!,
-        command: m.command!,
-        resumeCommand: m.resumeCommand,
+        command: withModel(m.command!, m.type!, m.model),
+        resumeCommand: withModel(m.resumeCommand ?? m.command!, m.type!, m.model),
         color: m.color,
         role: m.role,
+        model: m.model,
       })) as Member[],
     };
   }

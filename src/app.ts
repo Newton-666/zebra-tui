@@ -16,6 +16,8 @@ import {
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
 import { briefText, identityText } from "./kit.ts";
+import { discoverModelGroups, withModel } from "./models.ts";
+import { DEFAULT_COMMANDS } from "./types.ts";
 import { ScreenPoller } from "./poll.ts";
 import { AgentCell } from "./view/cell.ts";
 import { TeamGrid } from "./view/grid.ts";
@@ -70,7 +72,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         "",
         ` ${bold("Krystal")} ${dim("·")} ${bold(config.name)} ${dim(`· ${config.members.length} members`)}`,
         dim(` cwd: ${config.cwd}`),
-        ...(config.goal ? [dim(` 目标: ${config.goal}`)] : [dim(" 输入广播全员 · 行首 @ 弹窗选人 · :brief 重发简报 · :quit 退出")]),
+        ...(config.goal ? [dim(` 目标: ${config.goal}`)] : [dim(" 输入广播全员 · 行首 @ 弹窗选人 · :model 换模型 · :brief 重发简报 · :quit 退出")]),
         "",
         "",
       ];
@@ -229,6 +231,52 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       }
       lastAction = `已向 ${n} 名成员重发团队简报`;
       saveTeamConfig(config);
+      renderStatus();
+      return;
+    }
+    if (trimmed === ":model" || trimmed.startsWith(":model ")) {
+      const [, memberArg, ...rest] = trimmed.split(/\s+/);
+      const modelArg = rest.join(" ").trim();
+      if (!memberArg) {
+        const cur = config.members.map((m) => `${m.name}:${m.model ?? "默认"}`).join(" · ");
+        lastAction = truncateToWidth(cur, 70, "…");
+        renderStatus();
+        return;
+      }
+      const m = config.members.find((x) => x.name === memberArg || x.id === memberArg);
+      if (!m) {
+        lastAction = `未知成员: ${memberArg}`;
+        renderStatus();
+        return;
+      }
+      if (!modelArg) {
+        const groups = discoverModelGroups(m.type);
+        const sample = groups.slice(0, 2).map((g) => `${g.group}(${g.models.length})`).join(" ");
+        lastAction = `${m.name} 当前模型: ${m.model ?? "默认"} · 来源: ${sample} · 用法 :model ${m.name} <模型>`;
+        renderStatus();
+        return;
+      }
+      // 切换：用该类型的基准命令重新拼接模型（custom 保留原命令，可含 {} 占位）
+      const base = m.type === "custom" ? m.command : DEFAULT_COMMANDS[m.type]!.command;
+      const baseResume =
+        m.type === "custom" ? m.resumeCommand ?? m.command : DEFAULT_COMMANDS[m.type]!.resume ?? DEFAULT_COMMANDS[m.type]!.command;
+      m.model = modelArg;
+      m.command = withModel(base, m.type, modelArg);
+      m.resumeCommand = withModel(baseResume, m.type, modelArg);
+      saveTeamConfig(config);
+      const idx = config.members.indexOf(m);
+      const pane = paneIds[idx];
+      if (pane) {
+        try {
+          respawnPane(config, m, pane);
+          pendingIdentity.add(m.id); // 上下文重来 → 重新注入身份
+          lastAction = `${m.name} 模型已切到 ${modelArg}（窗格重启中，身份将重新注入）`;
+        } catch (e) {
+          lastAction = `切换失败: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      } else {
+        lastAction = `${m.name} 模型已切到 ${modelArg}（下次启动生效）`;
+      }
       renderStatus();
       return;
     }

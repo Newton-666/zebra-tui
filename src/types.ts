@@ -10,6 +10,7 @@ export interface Member {
   resumeCommand?: string; // best-effort resume variant (used when pane died)
   color?: string;        // ansi fg code base, e.g. "36"
   role?: string;         // 职责描述（写入团队简报，告诉成员它负责什么）
+  model?: string;        // 该成员使用的模型（拼进启动/恢复命令）
 }
 
 export interface TeamConfig {
