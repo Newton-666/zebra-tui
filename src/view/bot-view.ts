@@ -235,10 +235,31 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   const abort = new AbortController();
 
   const modelLine = cfg ? `${cfg.model}` : "未配置平台模型——回首页 Platform model 配置";
+  /** 开场面板（logo + 画像 + 信息卡）：新会话与续聊都渲染 */
+  const pushIntro = (model: string, sessionCwd: string) =>
+    renderPortrait(tui.terminal?.columns ?? 80, tui.terminal?.rows ?? 24, {
+      name: "Krystal Bot",
+      model,
+      tier: "阅读者",
+      cwd: sessionCwd,
+      sessionId: sessionId.replace(/^bot-/, ""),
+      memories: activeFacts(loadFacts()).length,
+    });
+
   /** 从事件流重建对话区（新会话为空；/resume 切换会话时复用） */
   const rebuild = (id: string) => {
     const toolById = new Map<string, ToolBlock>();
-    for (const e of loadEvents(id)) {
+    const evs = loadEvents(id);
+    const intro = evs.find((e) => e.t === "intro");
+    const meta = loadBotMeta(id);
+    if (intro && intro.t === "intro") {
+      transcript.items.push(...pushIntro(cfg?.model ?? intro.model, intro.cwd), "");
+    } else if (meta) {
+      // 旧会话（本次改动前建的）没有 intro 事件 → 补渲染并回填落盘
+      transcript.items.push(...pushIntro(cfg?.model ?? meta.model, meta.cwd), "");
+      appendEvent(id, { t: "intro", at: new Date().toISOString(), cwd: meta.cwd, model: meta.model, tier: meta.tier });
+    }
+    for (const e of evs) {
       if (e.t === "msg" && e.role === "user") transcript.items.push(new UserBlock(e.content), "");
       else if (e.t === "msg" && e.role === "assistant") {
         if (e.toolCalls?.length) {
@@ -258,17 +279,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   if (resumed) rebuild(sessionId);
   else {
     // 开场画像（hermes 式 Braille 点阵）：作为滚动流的第一条 → 一用起来就自然滚走
-    transcript.items.push(
-      ...renderPortrait(tui.terminal?.columns ?? 80, tui.terminal?.rows ?? 24, {
-        name: "Krystal Bot",
-        model: cfg?.model ?? "（未配置）",
-        tier: "阅读者",
-        cwd,
-        sessionId: sessionId.replace(/^bot-/, ""),
-        memories: activeFacts(loadFacts()).length,
-      }),
-      "",
-    );
+    transcript.items.push(...pushIntro(cfg?.model ?? "（未配置）", cwd), "");
+    appendEvent(sessionId, { t: "intro", at: new Date().toISOString(), cwd, model: cfg?.model ?? "", tier: "阅读者" });
   }
   /** 回溯历史（/resume）：清空对话区并重放所选会话 */
   const resumeSession = (id: string) => {
@@ -551,17 +563,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       if (cmd === "resume" || cmd === "sessions") openPicker();
       else if (cmd === "new") {
         sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者" }).id;
-        transcript.items = [
-          ...renderPortrait(tui.terminal?.columns ?? 80, tui.terminal?.rows ?? 24, {
-            name: "Krystal Bot",
-            model: cfg.model,
-            tier: "阅读者",
-            cwd,
-            sessionId: sessionId.replace(/^bot-/, ""),
-            memories: activeFacts(loadFacts()).length,
-          }),
-          "",
-        ];
+        transcript.items = [...pushIntro(cfg.model, cwd), ""];
+        appendEvent(sessionId, { t: "intro", at: new Date().toISOString(), cwd, model: cfg.model, tier: "阅读者" });
         usage = undefined;
         prevHistory = undefined;
         prefixStable = undefined;
