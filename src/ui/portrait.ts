@@ -71,6 +71,24 @@ export const ROSE_ART_SMALL: string[] = [
   "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠳⢼⠽⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 ];
 
+/** 迷你画像（28×14）——并排时的默认档（owner 反馈：38×20 偏大） */
+export const ROSE_ART_MINI: string[] = [
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡀⣼⡗⣤⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠱⣀⠀⠀⢀⢠⣺⡯⢈⢊⢿⢷⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⢀⠀⢎⢂⢆⡳⣻⣿⡵⡵⢜⣜⣿⡧⠤⣄⠀⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⡀⢆⠅⢅⣪⣲⡵⠿⠋⠌⡀⣀⡀⡀⠙⠸⣼⢸⣿⣦⡄⠀⠀⠀",
+  "⢀⢀⡔⣧⢫⡢⣕⣷⢛⠅⠖⠾⡾⣟⢿⢿⣿⣿⣶⣦⣀⠻⢿⣏⠁⠀⠀⠀",
+  "⠰⢟⣽⡊⠪⠚⠁⣈⣤⠶⠲⢓⠛⣋⣟⣿⣷⣿⣿⣿⣿⣷⣭⣻⣷⣤⠀⠀",
+  "⠀⠀⢹⡆⠀⡠⡞⡿⢁⣥⣦⡶⠓⠒⠂⠍⠝⠻⠿⣿⣿⣿⣿⣾⡪⡽⣿⣦",
+  "⠀⠀⢱⡈⢮⣾⢃⢮⣿⡿⠉⡠⣔⡦⣓⢝⢾⣝⢲⣉⡛⢿⣿⣿⣽⣾⠟⠁",
+  "⠀⢀⡾⠀⢺⢣⢟⣟⢿⣣⢮⠾⣱⣧⣤⡱⣕⠻⣎⣿⣿⠈⢻⣯⣿⠁⠀⠀",
+  "⣠⢾⠅⠀⠈⢪⠀⢳⠙⢾⣽⣿⣽⣿⣿⡟⣱⠃⣜⡟⣿⡤⣿⢻⣿⠀⠀⠀",
+  "⠱⠯⢳⢅⠄⡈⠳⣔⢱⡈⠛⢿⣿⣮⢯⣛⡁⢔⠋⣰⣿⢟⠜⠘⢾⠀⠀⠀",
+  "⠀⠀⠀⠁⠫⣢⡌⢆⡀⠉⠳⠮⡈⡻⣏⣏⣊⣤⠲⠻⠝⢠⣐⡬⠃⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠈⠘⠿⢮⣦⢌⢒⡶⣾⡞⠋⠑⠡⣰⡪⠗⠁⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠀⠉⠢⡵⠿⠃⠁⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+];
+
 export interface PortraitInfo {
   name: string;
   model: string;
@@ -113,10 +131,13 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
   const out: string[] = [...logo];
 
   // 在「宽」允许时优先并排：玫瑰在左、介绍在右（放得下完整画像就用完整）
-  const useFull = width >= fullW + GAP + RIGHT_MIN;
-  const useSmall = width >= smallW + GAP + RIGHT_MIN;
-  if (useFull || useSmall) {
-    const art = useFull ? ROSE_ART : ROSE_ART_SMALL;
+  // 并排时的画像档位：默认迷你；宽裕（还多出 40 列）才升到小图/完整
+  const miniW = wOf(ROSE_ART_MINI);
+  const useFull = width >= fullW + GAP + RIGHT_MIN + 40;
+  const useSmall = width >= smallW + GAP + RIGHT_MIN + 40;
+  const useMini = width >= miniW + GAP + RIGHT_MIN;
+  if (useFull || useSmall || useMini) {
+    const art = useFull ? ROSE_ART : useSmall ? ROSE_ART_SMALL : ROSE_ART_MINI;
     const artW = wOf(art);
     const right = rightCol(width - artW - GAP);
     out.push("");
@@ -130,8 +151,8 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
   // 窄屏：玫瑰整幅在下、介绍再往下（放得下完整画像就用完整）
   const fitsFull = width >= fullW && height >= LOGO_ROWS.length + ROSE_ART.length + 7;
   const fitsSmall = width >= smallW && height >= LOGO_ROWS.length + ROSE_ART_SMALL.length + 7;
-  if (fitsFull || fitsSmall) {
-    const art = fitsFull ? ROSE_ART : ROSE_ART_SMALL;
+  if (fitsFull || fitsSmall || width >= miniW) {
+    const art = fitsFull ? ROSE_ART : fitsSmall ? ROSE_ART_SMALL : ROSE_ART_MINI;
     out.push("");
     for (let i = 0; i < art.length; i++) out.push(fg(rowColor(i), art[i]!));
     out.push("");
