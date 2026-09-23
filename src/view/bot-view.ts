@@ -344,9 +344,13 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     pickerBlock = undefined;
   };
 
-  const openSessionsPicker = (atIndex = 0, note?: string): void => {
-    const sessions = listBotSessions();
-    const items = sessions.map((m) => {
+  let sessionsUI: { block: PickerBlock; list: SelectList; sessions: BotMeta[] } | undefined;
+
+  const refreshSessionsList = (note?: string): void => {
+    if (!sessionsUI) return;
+    const prevSel = pickerSel;
+    sessionsUI.sessions = listBotSessions();
+    const items = sessionsUI.sessions.map((m) => {
       const msgs = loadEvents(m.id).filter((e) => e.t === "msg");
       const firstUser = msgs.find((e) => e.role === "user");
       return {
@@ -355,19 +359,51 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         description: `${m.model} · ${msgs.length} 条消息 · ${firstUser?.content.slice(0, 36) ?? "(空)"}`,
       };
     });
+    sessionsUI.list = new SelectList(items, Math.min(items.length, 12), THEME);
+    const idx = Math.max(0, Math.min(items.findIndex((it) => it.value === prevSel), items.length - 1));
+    sessionsUI.list.setSelectedIndex(idx);
+    sessionsUI.list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
+    sessionsUI.list.onSelect = (it: { value: string }) => {
+      removePickerBlock();
+      resumeSession(it.value);
+    };
+    sessionsUI.list.onCancel = () => removePickerBlock();
+    sessionsUI.block.list = sessionsUI.list;
+    if (note) sessionsUI.block.note = note;
+  };
+
+  const msgs0 = (id: string) => loadEvents(id).filter((e) => e.t === "msg").length;
+  const openSessionsPicker = (): void => {
+    const prevSel = pickerSel;
+    if (!sessionsUI) {
+      const sessions = listBotSessions();
+      const items = sessions.map((m) => ({
+        value: m.id,
+        label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
+        description: `${m.model} · ${msgs0(m)} 条消息`,
+      }));
+      sessionsUI = { block: new PickerBlock(new SelectList(items, Math.min(items.length, 12), THEME)), list: new SelectList(items, 12, THEME), sessions };
+    }
+    sessionsUI.sessions = listBotSessions();
+    const items = sessionsUI.sessions.map((m) => ({
+      value: m.id,
+      label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
+      description: `${m.model} · ${msgs0(m)} 条消息`,
+    }));
     const list = new SelectList(items, Math.min(items.length, 12), THEME);
-    list.setSelectedIndex(Math.max(0, Math.min(atIndex, items.length - 1)));
+    const idx = Math.max(0, Math.min(items.findIndex((it) => it.value === pickerSel), items.length - 1));
+    list.setSelectedIndex(idx);
     list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
     list.onSelect = (it: { value: string }) => {
       removePickerBlock();
       resumeSession(it.value);
     };
     list.onCancel = () => removePickerBlock();
+    sessionsUI.block.list = list;
+    sessionsUI.block.note = "";
     picker = list;
     pickerKind = "sessions";
-    if (note) pickerBlock.note = note;
-    pickerBlock = new PickerBlock(list);
-    transcript.items.push(pickerBlock);
+    transcript.items.push(sessionsUI.block);
     refresh();
   };
 
