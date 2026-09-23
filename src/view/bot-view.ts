@@ -604,10 +604,19 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   if (!cfg) push(fg("31", " ✗ 未配置平台模型——esc 返回首页，先到 Platform model 配置"));
 
+  // 滚动区与状态行之间的固定空行：内容（思考/工具块）不再贴着输入框上沿
+  const gapComp: Component = {
+    render(): string[] {
+      return [""];
+    },
+    invalidate(): void {},
+  };
+
   tui.setLayoutRoot(
     new VStack([
       { component: headerComp, basis: "auto" },
       { component: scroll, basis: 0, grow: 1, minSize: 1 },
+      { component: gapComp, basis: 1 },
       { component: statusComp, basis: "auto" },
       { component: inputFrame, basis: "auto" },
     ]),
