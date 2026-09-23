@@ -15,12 +15,12 @@ import {
   type EditorTheme,
   type MarkdownTheme,
 } from "../../deps/pi-tui/dist/index.js";
-import { bold, dim, fg } from "../ui/ansi.ts";
+import { BLUE_LIGHT, bold, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
-const BLUE = "45"; // 与主输入框一致的浅蓝
+const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
 const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
 
 /** 与主 app 同源：pi-tui 的 Editor 自己画上下两条线，颜色由 borderColor 决定（重画会被渲染层吃掉） */
@@ -69,7 +69,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
   const transcript = new Transcript();
   const scroll = new ScrollView(transcript, { follow: "end", scrollbar: "auto", overscroll: "contain" });
   const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 4 });
-  const clearEditor = (editor as unknown as { setValue?: (v: string) => void }).setValue?.bind(editor);
+  const clearEditor = () => editor.setText("");
 
   const push = (...lines: (string | Markdown)[]) => {
     transcript.items.push(...lines);
@@ -89,7 +89,13 @@ export async function runBotFlow(cwd: string): Promise<void> {
     render(w: number): string[] {
       const inner = Math.max(10, w - 2);
       const side = w >= LOGO_WIDTH + 46;
-      const tag = ["", ` ${bold("Krystal Bot")} ${dim("· 原型 · 阅读者档位")}`, dim(` ${modelLine}`), dim(` ${cwd}`), ""];
+      const tag = [
+        "",
+        ` ${bold("原生成员")} ${dim("· 阅读者档位 · 原型")}`,
+        dim(` ${modelLine}`),
+        dim(` ${cwd}`),
+        "",
+      ];
       const out = [dim("╭" + "─".repeat(inner) + "╮")];
       for (let r = 0; r < LOGO_ROWS.length; r++) {
         const logo = fg(KRYSTAL_GRADIENT[r]!, LOGO_ROWS[r]!);
@@ -109,7 +115,10 @@ export async function runBotFlow(cwd: string): Promise<void> {
   };
   const inputFrame: Component = {
     render(w: number): string[] {
-      return editor.render(w); // pi-tui 原生两条线（浅蓝）
+      // Editor 总会画一个 \x1b[7m 反色软件光标块（终端主题下会显成粉/白），
+      // 我方统一改成平台蓝底方块，保证输入框全蓝
+      const blueBlock = `\x1b[48;5;45m\x1b[38;5;16m`;
+      return editor.render(w).map((l) => l.replace(/\x1b\[7m/g, blueBlock));
     },
     invalidate(): void {
       editor.invalidate();
@@ -202,13 +211,19 @@ export async function runBotFlow(cwd: string): Promise<void> {
     if (busy || !cfg) return;
     const body = text.trim();
     if (!body) return;
-    clearEditor?.("");
+    clearEditor();
     // pi 风格：提交后输入框清空，消息作为「块」落入对话区（左侧竖线 + 青色前缀）
     push(fg("36", " ▌") + fg("36", " 你") + "", fg("36", " ▌") + " " + body, "");
     runTurn(body);
   };
 
   const focusTarget = {
+    get focused(): boolean {
+      return editor.focused; // 必须真实转发：否则 Editor 认为未聚焦 → 退化成反色软件光标块（粉色高亮）
+    },
+    set focused(v: boolean) {
+      editor.focused = v;
+    },
     handleInput(data: string): void {
       const quit = () => {
         tui.stop();
@@ -228,11 +243,9 @@ export async function runBotFlow(cwd: string): Promise<void> {
       }
       editor.handleInput(data);
     },
-    invalidate(): void {},
-    get focused(): boolean {
-      return true;
+    invalidate(): void {
+      editor.invalidate();
     },
-    set focused(_v: boolean) {},
   };
 
   if (!cfg) push(fg("31", " ✗ 未配置平台模型——esc 返回首页，先到 Platform model 配置"));
