@@ -378,8 +378,10 @@ v0 进程内 async loop（实现 MemberDriver 契约，随时可拆成独立进�
 ### 11.6 反馈与信号（最小版）
 
 - `remember(text, entities)` — 写入（准入 = 显式，不做"未来复用概率"预测器）
-- `helpful(id)` / `wrong(id)` — 调整 trust（**显式、可审计**；比自动信号分更可靠）
-- `supersede(id, newText)` — 取代：旧条标 `superseded_by`，**不删**
+- `helpful(id)` / `wrong(id)` — 调整 trust（**显式、可审计**；比自动信号分更可靠）✓ 已实现（+0.2 / −0.3）
+- `supersede(id, newText)` — 取代：旧条标 `superseded_by`，**不删** ✓ 已实现
+- 以上都挂在**一个** `memory` 工具上（九个 op：remember/recall/about/related/connect/conflicts/helpful/wrong/supersede）
+  —— 一个工具而非九个，省 token
 - `used` 自增：召回命中即 +1（确定性，零 ML）
 
 **不做**：自动信号分加减、时间衰减公式、contextual bandit、harness RL（"灵魂"）——留待有数据后再说。
@@ -409,8 +411,9 @@ v0 进程内 async loop（实现 MemberDriver 契约，随时可拆成独立进�
 <项目>/library/MEMORY.md      # 项目记忆镜像（同 LN-1 形状）
 ```
 
-`MEMORY.md` 与 `facts.jsonl` 的同步照 `LN-1 双向镜像`：JSON 是运行时真源，md 是人的入口；
-**全量幂等重生成**（禁增量 patch）；md 更新则启动时导入（先备份，解析失败保守降级、不动原库）。
+`MEMORY.md` 与 `facts.jsonl` 的同步照 `LN-1 双向镜像` ✓ 已实现：JSON 是运行时真源，md 是人的入口；
+**全量幂等重生成**；md 比真源新 → 启动时导入（**写前备份** `facts.jsonl.bak`、导入后重生成镜像以给人手写的
+无 id 行补 id → 再次导入幂等、解析异常保守降级不动原库）。删除（md 里整条消失）暂不处理（避免误删）。
 
 ### 11.9 明确不做
 
@@ -445,7 +448,15 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
 | 信噪比 | 注入段里有效信息占比 |
 | token 效率 | 每轮 prompt token / 有效产出 |
 
-配套脚本：`scripts/recall-eval.ts <会话.jsonl> <问题集>` → 输出 recall@N 曲线。
+配套脚本 ✓ 已实现：`scripts/recall-eval.ts <questions.json> [--limit N]`
+输出：**命中率（recall@N）· 注入块 token 成本（信噪比）· 事实总数** + 逐条命中明细。
+问题集格式：`[{ "q": "闸门白名单在哪实现", "expect": ["src/bot.ts","白名单"] }]`。
+
+**中文检索**：中文没有词边界，整句会被当成一个 token → 检索用 **2-gram 展开**（不引入分词器）。
+实测：同一问题集的命中率 25% → 50%（未命中的那条是该库确实没有的事实，属正确未命中）。
+
+「有效记忆周期（recall@N 曲线）」需按轮次重放会话，属后续扩展（当前事实不随轮次衰减，
+曲线是检索算法的函数而非时间的函数）。
 **因为检索是确定性的（grep + 实体索引），评测零 API、零基建**——把红线 4 的成本降到几乎为零。
 任何记忆类改动合并前，曲线不得变差。
 
@@ -635,6 +646,7 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
 |---|---|
 | `/resume`（等价 `:resume`、`/sessions`） | 列出历史会话（时间 · 模型 · 消息数 · 首句），↑↓ 选择 → enter 恢复（清空对话区并重放事件流） |
 | `/new` | 开新会话（清空对话区，新 session id） |
+| `/memory`（等价 `:memory`、`/mem`） | 打印**记忆图**：统计 → 每实体一棵事实树 → 实体关联（图的边）→ 矛盾 → 文件路径（可手改） |
 | `/help` | 命令提示 |
 | 其它 `/…` `:…` | **只提示，绝不发给模型**（平台约定：未知命令不广播） |
 

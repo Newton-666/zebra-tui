@@ -124,13 +124,35 @@ export function supersedeFact(oldId: string, input: AddInput): Fact | undefined 
   return f;
 }
 
+/** 反馈：helpful +0.2 / wrong −0.3（显式、可审计；不做自动信号分） */
+export function adjustTrust(id: string, delta: number): Fact | undefined {
+  const f = loadFacts().find((x) => x.id === id);
+  if (!f) return undefined;
+  const trust = Math.max(0.1, Math.min(1, f.trust + delta));
+  append({ t: "fact_update", id, patch: { trust, updated: new Date().toISOString() } });
+  writeMirror();
+  return { ...f, trust };
+}
+
 export function markUsed(ids: string[]): void {
   for (const id of ids) append({ t: "fact_update", id, patch: { used: (loadFacts().find((f) => f.id === id)?.used ?? 0) + 1 } });
 }
 
 // ---------- 五个确定性查询（grep 式，无向量库） ----------
 
-const toks = (s: string) => s.toLowerCase().split(/[^\p{L}\p{N}_./@-]+/u).filter((t) => t.length > 1);
+// 中文没有词边界：整句会被当成一个 token → 用 2-gram 展开做最小检索（不引入分词器）
+const CJK = /[\u4e00-\u9fff]/;
+const toks = (s: string): string[] => {
+  const raw = s.toLowerCase().split(/[^\p{L}\p{N}_./@-]+/u).filter((t) => t.length > 1);
+  const out = new Set<string>();
+  for (const t of raw) {
+    out.add(t);
+    if (CJK.test(t) && t.length > 2) {
+      for (let i = 0; i + 2 <= t.length; i++) out.add(t.slice(i, i + 2));
+    }
+  }
+  return [...out];
+};
 const score = (f: Fact, ts: string[]) => {
   const hay = f.text.toLowerCase();
   const ents = f.entities.map((e) => e.toLowerCase());
@@ -250,6 +272,75 @@ export function writeMirror(): void {
   } catch {
     /* 降级 */
   }
+}
+
+// ---------- 双向镜像：MEMORY.md（人入口）→ facts.jsonl（真源）（LN-1） ----------
+
+export interface ImportResult { imported: number; added: number; skipped?: string }
+
+/**
+ * 启动时导入：md 比 jsonl 新 → 解析并应用（全量校验通过才写，写前备份）
+ * 保守降级：解析异常 → 不导入、不动数据。删除（md 里整条消失）暂不处理（避免误删，见文档）
+ */
+export function importMirror(): ImportResult {
+  let md = "";
+  let mdMtime = 0;
+  try {
+    md = fs.readFileSync(MIRROR, "utf8");
+    mdMtime = fs.statSync(MIRROR).mtimeMs;
+  } catch {
+    return { imported: 0, added: 0 };
+  }
+  let jsonMtime = 0;
+  try {
+    jsonMtime = fs.statSync(FACTS).mtimeMs;
+  } catch {
+    /* 还没有 jsonl：全量导入 */
+  }
+  if (jsonMtime && mdMtime <= jsonMtime) return { imported: 0, added: 0 }; // md 不比真源新 → 无事可做
+
+  const facts = loadFacts();
+  const byId = new Map(facts.map((f) => [f.id, f]));
+  const changes: { id: string; text: string }[] = [];
+  const additions: { id: string; text: string }[] = [];
+  for (const raw of md.split("\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("- ")) continue;
+    const m = /^-\s*\[([\w-]+)\]\s*(.+?)\s*(?:\([^)]*\))?$/.exec(line);
+    if (!m) {
+      // 有人手写了一条没有 id 的：当作新事实
+      if (line.startsWith("- ") && line.length > 4) additions.push({ id: "", text: line.slice(2).trim() });
+      continue;
+    }
+    const [, id, text] = m;
+    const exist = byId.get(id!);
+    if (!exist) additions.push({ id: id!, text: text!.trim() });
+    else if (exist.text.trim() !== text!.trim()) changes.push({ id: id!, text: text!.trim() });
+  }
+
+  if (!changes.length && !additions.length) return { imported: 0, added: 0 };
+  try {
+    fs.copyFileSync(FACTS, `${FACTS}.bak`); // 写前备份（保留最近一次）
+  } catch {
+    /* 首次导入无文件可备份 */
+  }
+  for (const c of changes) append({ t: "fact_update", id: c.id, patch: { text: c.text, updated: new Date().toISOString() } });
+  for (const a of additions) {
+    const f: Fact = {
+      id: a.id || rid(),
+      text: a.text.slice(0, 600),
+      entities: guessEntities(a.text),
+      by: "human",
+      trust: 0.8, // 人手写的更可信
+      used: 0,
+      created: new Date().toISOString(),
+      updated: new Date().toISOString(),
+    };
+    append({ t: "fact", f });
+  }
+  // 重生成镜像：给人手写的无 id 行补上 id → 保证再次导入幂等（否则每次启动都会重复新增）
+  writeMirror();
+  return { imported: changes.length, added: additions.length };
 }
 
 /** 把查询结果渲染成给模型看的一行行文本 */

@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, summarize, withSystem } from "./context.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
-import { about, addFact, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts } from "./memory.ts";
+import { about, addFact, adjustTrust, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts, supersedeFact } from "./memory.ts";
 
 const execAsync = promisify(exec);
 
@@ -42,11 +42,12 @@ export const READER_TOOLS: BotTool[] = [
   {
     name: "memory",
     description:
-      "长期记忆（跨会话）。op=remember 写入一句话事实｜recall 关键词检索｜about 某实体｜related 相关事实｜connect 两实体交集｜conflicts 矛盾",
+      "长期记忆（跨会话）。op=remember 写入｜recall 检索｜about 实体｜related 相关｜connect 交集｜conflicts 矛盾｜helpful/wrong 反馈某条（调信任）｜supersede 用新事实取代旧条",
     parameters: {
       type: "object",
       properties: {
-        op: { type: "string", enum: ["remember", "recall", "about", "related", "connect", "conflicts"] },
+        op: { type: "string", enum: ["remember", "recall", "about", "related", "connect", "conflicts", "helpful", "wrong", "supersede"] },
+        id: { type: "string", description: "op=helpful/wrong/supersede：目标事实 id（supersede 时是要被取代的旧条）" },
         text: { type: "string", description: "op=remember：一句话事实（一主题一条）" },
         entities: { type: "array", items: { type: "string" }, description: "op=remember：实体（文件/命令/成员/概念）" },
         query: { type: "string", description: "op=recall" },
@@ -160,6 +161,16 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
         return { ok: true, output: renderFacts(f) };
       }
       if (op === "connect") return { ok: true, output: renderFacts(connect(str(args.a), str(args.b))) };
+      if (op === "helpful" || op === "wrong") {
+        const f = adjustTrust(str(args.id), op === "helpful" ? 0.2 : -0.3);
+        return f ? { ok: true, output: `${op === "helpful" ? "已加强" : "已降权"} [${f.id}] ${f.text} → trust ${f.trust.toFixed(2)}` } : { ok: false, output: `找不到事实 ${str(args.id)}` };
+      }
+      if (op === "supersede") {
+        const text = str(args.text);
+        if (!text) return { ok: false, output: "op=supersede 需要 text（新事实）" };
+        const f = supersedeFact(str(args.id), { text, entities: arr(args.entities), by: "bot" });
+        return f ? { ok: true, output: `已取代：新 [${f.id}] ${f.text}（旧条保留但不注入）` } : { ok: false, output: `找不到事实 ${str(args.id)}` };
+      }
       if (op === "conflicts") {
         const cs = conflicts();
         return {

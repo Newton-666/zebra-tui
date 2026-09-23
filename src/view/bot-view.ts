@@ -20,7 +20,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
-import { renderGraph } from "../memory.ts";
+import { importMirror, renderGraph } from "../memory.ts";
 import {
   appendEvent,
   contextWindow,
@@ -597,6 +597,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       editor.invalidate();
     },
   };
+
+  // 启动时：MEMORY.md 若比真源新（人改过）→ 导入（备份 + 保守降级）
+  const imp = importMirror();
+  if (imp.imported || imp.added) push(dim(`  · 已从 MEMORY.md 导入：更新 ${imp.imported} 条、新增 ${imp.added} 条`), "");
 
   if (!cfg) push(fg("31", " ✗ 未配置平台模型——esc 返回首页，先到 Platform model 配置"));
 
