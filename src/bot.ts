@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, summarize, withSystem } from "./context.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
+import { about, addFact, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts } from "./memory.ts";
 
 const execAsync = promisify(exec);
 
@@ -36,6 +37,25 @@ export const READER_TOOLS: BotTool[] = [
       type: "object",
       properties: { path: { type: "string", description: "文件路径" } },
       required: ["path"],
+    },
+  },
+  {
+    name: "memory",
+    description:
+      "长期记忆（跨会话）。op=remember 写入一句话事实｜recall 关键词检索｜about 某实体｜related 相关事实｜connect 两实体交集｜conflicts 矛盾",
+    parameters: {
+      type: "object",
+      properties: {
+        op: { type: "string", enum: ["remember", "recall", "about", "related", "connect", "conflicts"] },
+        text: { type: "string", description: "op=remember：一句话事实（一主题一条）" },
+        entities: { type: "array", items: { type: "string" }, description: "op=remember：实体（文件/命令/成员/概念）" },
+        query: { type: "string", description: "op=recall" },
+        entity: { type: "string", description: "op=about/related" },
+        a: { type: "string", description: "op=connect 的第一个实体" },
+        b: { type: "string", description: "op=connect 的第二个实体" },
+        evidence: { type: "string", description: "op=remember：证据（文件:行号 / 命令输出片段）" },
+      },
+      required: ["op"],
     },
   },
   {
@@ -118,6 +138,41 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
         await fh.close();
       }
     }
+    if (name === "memory") {
+      // 记忆是平台原语（不是文件系统操作）→ 不受只读档位限制；写入的是记忆库，不是仓库
+      const op = String(args.op ?? "");
+      const str = (v: unknown) => String(v ?? "").trim();
+      const arr = (v: unknown) => (Array.isArray(v) ? v.map((x) => str(x)).filter(Boolean) : []);
+      if (op === "remember") {
+        const text = str(args.text);
+        if (!text) return { ok: false, output: "op=remember 需要 text" };
+        const f = addFact({ text, entities: arr(args.entities), evidence: str(args.evidence) || undefined, by: "bot" });
+        return { ok: true, output: `已记住 [${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}` };
+      }
+      if (op === "recall") {
+        const r = recall(str(args.query));
+        markUsed(r.map((f) => f.id));
+        return { ok: true, output: renderFacts(r) };
+      }
+      if (op === "about" || op === "related") {
+        const f = (op === "about" ? about : related)(str(args.entity));
+        markUsed(f.map((x) => x.id));
+        return { ok: true, output: renderFacts(f) };
+      }
+      if (op === "connect") return { ok: true, output: renderFacts(connect(str(args.a), str(args.b))) };
+      if (op === "conflicts") {
+        const cs = conflicts();
+        return {
+          ok: true,
+          output: cs.length
+            ? cs
+                .map((c) => `冲突（${c.reason}）：\n  A [${c.a.id}] ${c.a.text} (by ${c.a.by})\n  B [${c.b.id}] ${c.b.text} (by ${c.b.by})`)
+                .join("\n")
+            : "（未发现矛盾）",
+        };
+      }
+      return { ok: false, output: `未知 op：${op}` };
+    }
     if (name === "run_command") {
       const cmd = String(args.command ?? "");
       if (!commandAllowed(cmd)) return { ok: false, denied: true, output: `策略闸门拒绝（档位：阅读者，白名单外）：${cmd.slice(0, 80)}` };
@@ -186,12 +241,25 @@ export async function streamChat(
       try {
         const json = JSON.parse(payload) as {
           choices?: { delta?: typeof delta }[];
-          usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+            prompt_cache_hit_tokens?: number; // DeepSeek
+            cached_tokens?: number; // 部分兼容端点
+            cache_read_input_tokens?: number; // Anthropic 风格
+          };
         };
         if (json.usage) {
           h.onUsage?.({
             prompt: json.usage.prompt_tokens ?? 0,
-            cached: json.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            // 跨厂商兼容：取第一个存在的缓存命中字段（都不报 → 0，界面显示「—」，靠本地前缀稳定性判据）
+            cached:
+              json.usage.prompt_tokens_details?.cached_tokens ??
+              json.usage.prompt_cache_hit_tokens ??
+              json.usage.cached_tokens ??
+              json.usage.cache_read_input_tokens ??
+              0,
             completion: json.usage.completion_tokens ?? 0,
           });
         }
@@ -253,7 +321,8 @@ export async function runBotTask(opts: {
 }): Promise<void> {
   const { cfg, cwd, events, signal, onEvent, maxTurns = 8 } = opts;
   // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
-  const system = SYSTEM(cwd, "阅读者");
+  const mem = memoryBlock();
+  const system = SYSTEM(cwd, "阅读者") + (mem ? `\n\n${mem}` : "");
   const win = contextWindow(cfg.model);
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));
   const summarizeAt = Number(process.env.KRYSTAL_CONTEXT_SUMMARIZE_AT ?? Math.round(win * 0.85));
