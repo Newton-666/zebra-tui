@@ -4,6 +4,7 @@
 // 来源：owner 提供的 Rose.png，程序化点阵转换（块均值 + Floyd–Steinberg 抖动 + 裁剪）。
 // 生成脚本见 docs（块均值降采样 → 背景减法 → 抖动 → Braille 码位）。
 import { BLUE_LIGHT, bold, chip, dim, fg } from "./ansi.ts";
+import { visibleWidth, wrapTextWithAnsi } from "../../deps/pi-tui/dist/index.js";
 import { KRYSTAL_GRADIENT, LOGO_ROWS } from "./logo.ts";
 
 /** 完整画像（72×37，点阵 144×148） */
@@ -119,13 +120,28 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
 
   if (width < 34) return [` ${bold(info.name)} ${dim("· 原生成员")}`];
 
-  // 右侧介绍列（名字 / 标语 / 会话信息卡）
-  const rightCol = (rw: number): string[] => [
-    bold(info.name),
-    fg(BLUE_LIGHT, TAGLINE),
-    "",
-    ...sessionCard(rw, info),
-  ];
+  // 右侧介绍列：名字 / 标语 / 简介 / 命令 / 工具 / 会话信息卡（写多）
+  const rightCol = (rw: number): string[] => {
+    const w = Math.max(20, rw);
+    const para = (t: string) => wrapTextWithAnsi(t, w).map((l) => dim(l));
+    const kv = (k: string, v: string) => `  ${chip(` ${k} `, "48;5;24", "38;5;255")} ${v.length > w - 8 ? `${v.slice(0, Math.max(4, w - 9))}…` : v}`;
+    return [
+      bold(info.name),
+      fg(BLUE_LIGHT, TAGLINE),
+      "",
+      ...para("Krystal 平台的原生成员：与团队共用一套协议（身份 / 派工 / 白板 / 汇报），"),
+      ...para("可查文件、跑只读命令、记住跨会话的事实。"),
+      "",
+      `  ${chip(" 命令 ", "48;5;25", "38;5;231")} ${dim("/resume 回溯 · /memory 记忆图 · /new 新会话 · /help")}`,
+      `  ${chip(" 工具 ", "48;5;25", "38;5;231")} ${dim("list_dir · read_file · run_command · memory")}`,
+      "",
+      kv("模型", info.model),
+      kv("档位", info.tier),
+      kv("目录", info.cwd),
+      kv("会话", info.sessionId),
+      kv("记忆", `${info.memories ?? 0} 条事实`),
+    ];
+  };
 
   const logo = LOGO_ROWS.map((r, i) => fg(KRYSTAL_GRADIENT[i % KRYSTAL_GRADIENT.length]!, r));
   const out: string[] = [...logo];
@@ -138,12 +154,17 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
   const useMini = width >= miniW + GAP + RIGHT_MIN;
   if (useFull || useSmall || useMini) {
     const art = useFull ? ROSE_ART : useSmall ? ROSE_ART_SMALL : ROSE_ART_MINI;
-    const artW = wOf(art);
-    const right = rightCol(width - artW - GAP);
+    const inner = wOf(art);
+    const label = "画像";
+    const top = dim("╭─") + dim(` ${label} `) + dim("─".repeat(Math.max(0, inner - label.length)) + "╮");
+    const bottom = dim("╰" + "─".repeat(inner) + "╯");
+    const framed = [top, ...art.map((r, i) => dim("│") + fg(rowColor(i), r.padEnd(inner)) + dim("│")), bottom];
+    const right = rightCol(width - inner - 2 - GAP);
     out.push("");
-    for (let i = 0; i < Math.max(art.length, right.length); i++) {
-      const left = art[i] ? fg(rowColor(i), art[i]!.padEnd(artW)) : " ".repeat(artW);
-      out.push(`${left}${" ".repeat(GAP)}${right[i] ?? ""}`);
+    for (let i = 0; i < Math.max(framed.length, right.length); i++) {
+      const left = framed[i] ?? " ".repeat(inner + 2);
+      const pad = Math.max(0, inner + 2 - visibleWidth(left));
+      out.push(`${left}${" ".repeat(pad + GAP)}${right[i] ?? ""}`);
     }
     return out;
   }
