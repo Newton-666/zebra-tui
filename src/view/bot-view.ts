@@ -403,6 +403,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     sessionsUI.block.note = "";
     picker = list;
     pickerKind = "sessions";
+    pickerBlock = sessionsUI.block; // d 的处理依赖它
     transcript.items.push(sessionsUI.block);
     refresh();
   };
@@ -731,6 +732,11 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         return;
       }
       if (matchesKey(data, "escape")) {
+        if (picker) {
+          removePickerBlock(); // 有弹窗 → 只收弹窗（不退回主页面）
+          tui.requestRender();
+          return;
+        }
         if (busy) {
           abort.abort(); // 中断当前生成（可继续输入）
         } else {
