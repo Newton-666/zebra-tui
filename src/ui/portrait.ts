@@ -169,16 +169,16 @@ export function renderPortrait(width: number, height: number, info: PortraitInfo
     const PAD_Y = 1;
     const BORDER = 2; // 左右各一条框线
     // 宽度：先给右列理想宽度，再按终端宽度收缩；放不下就退化
+    // 框与屏幕同宽：右列吃掉剩余宽度（内部再按右列宽截断）
     const avail = width - BORDER - PAD_X * 2;
-    let rightW = Math.min(58, Math.max(40, avail - artW - GAP));
-    if (artW + GAP + rightW > avail) rightW = avail - artW - GAP;
+    const rightW = avail - artW - GAP;
     if (rightW < 28) return stacked(); // 右列太窄 → 上下排
-    const innerW = artW + GAP + rightW;
+    const innerW = avail;
 
     const right = rightCol(rightW);
     const rows: string[] = [];
-    rows.push(centerIn(bold(info.name), innerW));
-    rows.push(centerIn(fg(BLUE_LIGHT, TAGLINE), innerW));
+    rows.push(bold(info.name));
+    rows.push(fg(BLUE_LIGHT, TAGLINE));
     rows.push("");
     for (let i = 0; i < Math.max(art.length, right.length); i++) {
       const left = art[i] ? fg(rowColor(i), art[i]!.padEnd(artW)) : " ".repeat(artW);
