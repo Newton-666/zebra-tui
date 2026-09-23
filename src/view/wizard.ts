@@ -404,7 +404,7 @@ class Wizard implements Component, Focusable {
       ...groups.map((g, gi) => ({
         value: `g${gi}`,
         label: g.group,
-        description: g.models.length ? `${g.models.length} 个模型 · 例：${g.models[0]!.value}` : "",
+        description: g.note ?? (g.models.length ? `${g.models.length} 个模型 · 例：${g.models[0]!.value}` : ""),
       })),
       { value: "__custom", label: "自定义…", description: "手输模型 id" },
       { value: "__back", label: "返回" },

@@ -80,12 +80,17 @@ class CellBottom implements Component {
   }
 }
 
+/** 快照累积：末帧原地更新（状态条抖动），差异大才追加新帧（可回滚的历史） */
+const MAX_FRAMES = 60;
+const FRAME_DIFF_THRESHOLD = 2;
+
 export class AgentCell {
   readonly root: VStack;
   private top: CellTop;
   private tail: Tail;
   readonly scrollView: ScrollView;
   private lines: string[] = [];
+  private frames: string[][] = [];
 
   constructor(member: Member) {
     this.top = new CellTop(member);
@@ -97,14 +102,34 @@ export class AgentCell {
     this.root.addChild(new CellBottom(member));
   }
 
-  setScreen(lines: string[], alive: boolean, active: boolean): void {
-    this.lines = lines.slice(-TAIL_KEEP);
-    this.top.set(alive, active);
-    // 掐掉前后空行：空态 TUI（如 hermes 只有底部提示符）也能立刻看见内容
-    const kept = [...this.lines];
+  /** 归一化一屏：去掉前后空行（空态 TUI 也能看见内容） */
+  private static normalize(lines: string[]): string[] {
+    const kept = [...lines].slice(-TAIL_KEEP);
     while (kept.length > 0 && kept[kept.length - 1]!.trim() === "") kept.pop();
     let start = 0;
     while (start < kept.length && kept[start]!.trim() === "") start++;
-    this.tail.set(kept.slice(start));
+    return kept.slice(start);
+  }
+
+  private accumulate(frame: string[]): void {
+    const last = this.frames[this.frames.length - 1];
+    if (!last) {
+      this.frames.push(frame);
+      return;
+    }
+    // 统计差异行数；差异小（状态条/计时器抖动）→ 原地替换末帧，不增长历史
+    let diff = Math.abs(last.length - frame.length);
+    const n = Math.min(last.length, frame.length);
+    for (let i = 0; i < n; i++) if (last[i] !== frame[i]) diff++;
+    if (diff <= FRAME_DIFF_THRESHOLD) this.frames[this.frames.length - 1] = frame;
+    else this.frames.push(frame);
+    if (this.frames.length > MAX_FRAMES) this.frames.splice(0, this.frames.length - MAX_FRAMES);
+  }
+
+  setScreen(lines: string[], alive: boolean, active: boolean): void {
+    this.lines = lines.slice(-TAIL_KEEP);
+    this.top.set(alive, active);
+    this.accumulate(AgentCell.normalize(this.lines));
+    this.tail.set(this.frames.flat());
   }
 }

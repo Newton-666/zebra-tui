@@ -12,6 +12,8 @@ export interface ModelChoice {
 export interface ModelGroup {
   group: string;
   models: ModelChoice[];
+  /** 附加提示（例如：该来源与 agent 当前 provider 不同，可能需先在 agent 侧配置） */
+  note?: string;
 }
 
 const HOME = os.homedir();
@@ -77,6 +79,13 @@ function piGroups(): ModelGroup[] {
 // ---------------- hermes ----------------
 function hermesGroups(): ModelGroup[] {
   const groups: ModelGroup[] = [];
+  let active = "";
+  try {
+    const y = fs.readFileSync(path.join(HOME, ".hermes/config.yaml"), "utf8");
+    active = /^\s*provider:\s*(\S+)/m.exec(y)?.[1] ?? "";
+  } catch {
+    /* 没有配置就跳过 */
+  }
   // 1) 当前默认（从 config.yaml 读）
   try {
     const y = fs.readFileSync(path.join(HOME, ".hermes/config.yaml"), "utf8");
@@ -97,6 +106,16 @@ function hermesGroups(): ModelGroup[] {
         .filter(Boolean) as ModelChoice[];
       if (models.length) groups.push({ group: prov, models });
     }
+  }
+  // 当前 provider 排在最前；其他来源标注提示（换了来源可能需要先配置密钥/端点）
+  groups.sort((a, b) => {
+    const rank = (g: ModelGroup) => (/当前默认/.test(g.group) ? 0 : g.group === active ? 1 : 2);
+    return rank(a) - rank(b);
+  });
+  for (const g of groups) {
+    if (/当前默认/.test(g.group)) continue;
+    if (g.group === active) g.group = `${g.group}（当前 provider）`;
+    else g.note = "其他来源：需该 provider 已配置密钥/端点";
   }
   return groups;
 }
