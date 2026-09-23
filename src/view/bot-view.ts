@@ -51,7 +51,9 @@ const BOT_THEME: MarkdownTheme = {
 
 class Transcript implements Component {
   items: (string | Component)[] = [];
+  lastWidth = 0;
   render(w: number): string[] {
+    this.lastWidth = w;
     const out: string[] = [];
     for (const it of this.items) {
       const lines = typeof it === "string" ? [it] : it.render(w);
@@ -169,9 +171,19 @@ export async function runBotFlow(cwd: string): Promise<void> {
   const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 4 });
   const clearEditor = () => editor.setText("");
 
-  const push = (...lines: (string | Markdown)[]) => {
-    transcript.items.push(...lines);
+  /** 内容变化后主动重算滚动视图布局：否则高度突变的那一帧会用旧高度 → 溢出、破坏输入框 */
+  const refresh = () => {
+    const w = transcript.lastWidth || 100;
+    try {
+      scroll.updateLayout(transcript.render(w).length, scroll.viewportHeight, () => tui.requestRender());
+    } catch {
+      /* 布局尚未就绪 */
+    }
     tui.requestRender();
+  };
+  const push = (...lines: (string | Component)[]) => {
+    transcript.items.push(...lines);
+    refresh();
   };
 
   let busy = false;
@@ -233,7 +245,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
   };
   const streamTo = (delta: string) => {
     streamItem?.append(delta);
-    tui.requestRender();
+    refresh();
   };
   const closeStream = () => {
     streamItem = undefined;
@@ -277,7 +289,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
           currentTool.args = new ToolBlock(e.name, e.argsSoFar).args;
         }
         tokens += e.argsSoFar.length / 40;
-        tui.requestRender();
+        refresh();
         break;
       }
       case "tool_start": {
@@ -295,7 +307,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
       case "tool_result": {
         currentTool?.setResult(e.ok, e.denied, e.output);
         currentTool = undefined;
-        tui.requestRender();
+        refresh();
         break;
       }
       case "final": {
