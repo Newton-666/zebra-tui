@@ -3,6 +3,7 @@
 // 流式渲染：thinking（dim 流动行）/ 工具调用（▸ 工具 参数 → 结果行）/ 回答
 import {
   Input,
+  Markdown,
   ProcessTerminal,
   ScrollView,
   TuiAltScreen,
@@ -11,8 +12,9 @@ import {
   truncateToWidth,
   visibleWidth,
   type Component,
+  type MarkdownTheme,
 } from "../../deps/pi-tui/dist/index.js";
-import { dim, fg } from "../ui/ansi.ts";
+import { bold, dim, fg } from "../ui/ansi.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
@@ -22,10 +24,33 @@ const rule = (w: number, color = "36") => fg(color, "─".repeat(Math.max(0, w -
 
 type Line = string;
 
+/** 与 pi 一致：回答用 Markdown 渲染（pi-tui 自带组件） */
+const BOT_THEME: MarkdownTheme = {
+  heading: (t) => bold(fg("36", t)),
+  link: (t) => fg("34", t),
+  linkUrl: (t) => dim(t),
+  code: (t) => fg("33", t),
+  codeBlock: (t) => fg("33", t),
+  codeBlockBorder: (t) => dim(t),
+  quote: (t) => dim(t),
+  quoteBorder: (t) => dim(t),
+  hr: (t) => dim("─".repeat(30)),
+  listBullet: (t) => fg("36", t),
+  bold,
+  italic: (t) => t,
+  strikethrough: (t) => t,
+  underline: (t) => t,
+};
+
 class Transcript implements Component {
-  lines: Line[] = [];
+  items: (string | Markdown)[] = [];
   render(w: number): string[] {
-    return this.lines.map((l) => truncateToWidth(l, w, "…"));
+    const out: string[] = [];
+    for (const it of this.items) {
+      if (typeof it === "string") out.push(truncateToWidth(it, w, "…"));
+      else out.push(...it.render(w));
+    }
+    return out;
   }
   invalidate(): void {}
 }
@@ -39,8 +64,8 @@ export async function runBotFlow(cwd: string): Promise<void> {
   const scroll = new ScrollView(transcript, { follow: "end", scrollbar: "auto", overscroll: "contain" });
   const input = new Input();
 
-  const push = (...lines: Line[]) => {
-    transcript.lines.push(...lines);
+  const push = (...lines: (string | Markdown)[]) => {
+    transcript.items.push(...lines);
     tui.requestRender();
   };
 
@@ -86,11 +111,11 @@ export async function runBotFlow(cwd: string): Promise<void> {
     if (streamIdx >= 0) closeStream();
     streamBuf = "";
     push(prefix);
-    streamIdx = transcript.lines.length - 1;
+    streamIdx = transcript.items.length - 1;
   };
   const streamTo = (delta: string, build: (buf: string) => string) => {
     streamBuf += delta;
-    if (streamIdx >= 0) transcript.lines[streamIdx] = build(streamBuf);
+    if (streamIdx >= 0) transcript.items[streamIdx] = build(streamBuf);
     tui.requestRender();
   };
   const closeStream = () => {
@@ -131,13 +156,20 @@ export async function runBotFlow(cwd: string): Promise<void> {
         push(`   ${mark} ${dim(first.slice(0, 200))}`);
         break;
       }
-      case "final":
+      case "final": {
+        // 流式原始行 → Markdown 渲染块（与 pi 的回答观感一致）
+        const at = streamIdx;
         closeStream();
         state = "完成";
-        if (e.text.trim()) push("");
+        if (e.text.trim()) {
+          if (at >= 0) transcript.items.splice(at, 1);
+          push(new Markdown(e.text, 1, 0, BOT_THEME));
+          push("");
+        }
         history.push({ role: "assistant", content: e.text });
         busy = false;
         break;
+      }
       case "error":
         closeStream();
         push(fg("31", ` ✗ ${e.message}`));
