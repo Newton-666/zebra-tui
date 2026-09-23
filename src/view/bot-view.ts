@@ -64,18 +64,22 @@ class Transcript implements Component {
   invalidate(): void {}
 }
 
-/** 用户消息：平台胶囊风格蓝底块（pi 风格的块；ScrollView 不保留整宽尾随空格，故宽度随内容） */
+/** 用户消息块：整页宽蓝底 + 上下留白（对齐 pi 的 Box(padX=1, padY=1) 观感）
+ *  说明：对话区的 ScrollView 会裁掉「纯空白行」，故留白行末尾缀一个零宽字符（不可见但非空白，保住整行背景） */
+const ZWSP = "\u200b";
 class UserBlock implements Component {
   private text: string;
   constructor(text: string) {
     this.text = text;
   }
   render(w: number): string[] {
-    const inner = Math.max(8, w - 6);
-    return wrapTextWithAnsi(this.text, inner).map((r) => {
-      const padTo = Math.max(0, inner - visibleWidth(r));
-      return chip(" " + r + " ".repeat(padTo) + " ", "48;5;24", "38;5;255");
-    });
+    const inner = Math.max(8, w - 4);
+    const fill = (body: string) => {
+      const padTo = Math.max(0, inner - visibleWidth(body));
+      return chip(body + " ".repeat(padTo) + ZWSP, "48;5;24", "38;5;255");
+    };
+    const rows = wrapTextWithAnsi(this.text, inner - 2).map((r) => fill(" " + r));
+    return [fill(""), ...rows, fill("")];
   }
   invalidate(): void {}
 }
@@ -244,8 +248,8 @@ export async function runBotFlow(cwd: string): Promise<void> {
     const body = text.trim();
     if (!body) return;
     clearEditor();
-    // pi 风格：消息以「整宽蓝色背景块」落入对话区
-    push(new UserBlock(body));
+    // pi 风格：消息以「整宽蓝色背景块」落入对话区（块后留一空行）
+    push(new UserBlock(body), "");
     runTurn(body);
   };
 
