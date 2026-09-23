@@ -20,6 +20,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
+import { renderGraph } from "../memory.ts";
 import {
   appendEvent,
   contextWindow,
@@ -542,11 +543,15 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         summaryActive = false;
         push(dim("  新会话已开始"), "");
         refresh();
+      } else if (cmd === "memory" || cmd === "mem") {
+        const g = renderGraph();
+        push("", ...g.lines.map((l) => (l.startsWith("●") || l.startsWith("○") ? fg("36", l) : dim(l))), "");
+        refresh();
       } else if (cmd === "help") {
-        push(dim("  /resume 回溯历史 · /new 新会话 · esc 中断 · ctrl+c 退出"), "");
+        push(dim("  /resume 回溯历史 · /memory 看记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"), "");
         refresh();
       } else {
-        push(dim(`  未知命令 ${body}（可用 /resume · /new · /help）`), "");
+        push(dim(`  未知命令 ${body}（可用 /resume · /memory · /new · /help）`), "");
         refresh();
       }
       return;

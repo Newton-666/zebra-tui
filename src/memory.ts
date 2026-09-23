@@ -87,8 +87,17 @@ export const activeFacts = (facts: Fact[]): Fact[] => facts.filter((f) => !f.sup
 
 export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number }
 
-export function addFact(input: AddInput): Fact {
+export function addFact(input: AddInput): Fact & { existed?: boolean } {
   const at = new Date().toISOString();
+  // 一主题一条：同文本的活跃事实 → 更新原条（加强信任），不新增（否则重复记忆会淹没注入块）
+  const key = input.text.trim().toLowerCase();
+  const dup = activeFacts(loadFacts()).find((f) => f.text.trim().toLowerCase() === key);
+  if (dup && key) {
+    const trust = Math.min(1, dup.trust + 0.05);
+    append({ t: "fact_update", id: dup.id, patch: { updated: at, trust } });
+    writeMirror();
+    return { ...dup, trust, existed: true };
+  }
   const f: Fact = {
     id: rid(),
     text: input.text.trim().slice(0, 600),
@@ -248,3 +257,66 @@ export const renderFacts = (facts: Fact[], emptyHint = "（没有匹配的记忆
   facts.length
     ? facts.map((f) => `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}`).join("\n")
     : emptyHint;
+// ---------- /memory：把记住的东西与图都画出来（终端友好的「树 + 边」） ----------
+
+export interface GraphView { lines: string[]; facts: number; entities: number; superseded: number; edges: number; conflicts: number }
+
+export function renderGraph(): GraphView {
+  const all = loadFacts();
+  const active = activeFacts(all);
+  const superseded = all.length - active.length;
+
+  // 实体 → 事实（稳定序：事实按创建序）
+  const byEntity = new Map<string, Fact[]>();
+  for (const f of active) {
+    for (const e of f.entities) byEntity.set(e, [...(byEntity.get(e) ?? []), f]);
+  }
+  const sorted = [...byEntity.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+
+  // 实体间的边：同一条事实里的实体两两相连
+  const edge = new Map<string, number>();
+  for (const f of active) {
+    const es = [...new Set(f.entities)];
+    for (let i = 0; i < es.length; i++) {
+      for (let j = i + 1; j < es.length; j++) {
+        const [a, b] = [es[i]!, es[j]!].sort((x, y) => x.localeCompare(y));
+        edge.set(`${a} ↔ ${b}`, (edge.get(`${a} ↔ ${b}`) ?? 0) + 1);
+      }
+    }
+  }
+
+  const cs = conflicts();
+  const lines: string[] = [];
+  lines.push(
+    `记忆图：${active.length} 条事实 · ${byEntity.size} 个实体 · ${edge.size} 条关联` +
+      `${superseded ? ` · ${superseded} 条被取代（不注入，可检索）` : ""}` +
+      `${cs.length ? ` · ${cs.length} 处矛盾` : ""}`,
+  );
+  if (!active.length) {
+    lines.push("", "（记忆还是空的——让我做事时可以说「记住：……」或直接用 memory 工具 remember）");
+  }
+  for (const [e, list] of sorted) {
+    lines.push("", `● ${e} (${list.length})`);
+    list.forEach((f, i) => {
+      const branch = i === list.length - 1 ? "└─" : "├─";
+      lines.push(`  ${branch} [${f.id}] ${f.text}  · ${f.by} · trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`);
+    });
+  }
+  const orphan = active.filter((f) => !f.entities.length);
+  if (orphan.length) {
+    lines.push("", `○ 未挂实体 (${orphan.length})`);
+    for (const f of orphan) lines.push(`  └─ [${f.id}] ${f.text}`);
+  }
+  if (edge.size) {
+    lines.push("", "实体关联（共享事实）：");
+    for (const [k, n] of [...edge.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+      lines.push(`  ${k}${n > 1 ? ` ×${n}` : ""}`);
+    }
+  }
+  if (cs.length) {
+    lines.push("", "矛盾：");
+    for (const c of cs) lines.push(`  ${c.reason}`, `    A [${c.a.id}] ${c.a.text} (by ${c.a.by})`, `    B [${c.b.id}] ${c.b.text} (by ${c.b.by})`);
+  }
+  lines.push("", `可手改：${MIRROR}`, `真源：${FACTS}`);
+  return { lines, facts: active.length, entities: byEntity.size, superseded, edges: edge.size, conflicts: cs.length };
+}

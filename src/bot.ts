@@ -147,7 +147,7 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
         const text = str(args.text);
         if (!text) return { ok: false, output: "op=remember 需要 text" };
         const f = addFact({ text, entities: arr(args.entities), evidence: str(args.evidence) || undefined, by: "bot" });
-        return { ok: true, output: `已记住 [${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}` };
+        return { ok: true, output: `${f.existed ? "已有此条（已加强信任）" : "已记住"} [${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}` };
       }
       if (op === "recall") {
         const r = recall(str(args.query));
