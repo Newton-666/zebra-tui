@@ -221,6 +221,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let pickerKind: "sessions" | "mode" | undefined;
   let mode: Mode = resumed?.mode ?? loadBotMeta(sessionId)?.mode ?? "readonly";
   let deleteArmed: string | undefined; // 两次 d 删除：第一次只武装并提示
+  let pickerSel: string | undefined; // 当前选中的会话 id（重开列表时恢复位置）
   let foldCount = 0; // 本回合折叠的工具输出条数（上下文回收的可见性）
   let summaryActive = resumed ? !!lastSummary(loadEvents(sessionId)) : false;
   // 本地「前缀稳定性」：与上一回合的稳定前缀逐字节比对（provider 不报 cached_tokens 时的可靠判据）
@@ -303,7 +304,11 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     push(dim(`  已回溯到 ${id}`), "");
     refresh();
   };
-  const openPicker = () => {
+  const removePickerItem = () => {
+    const i = transcript.items.indexOf(picker as unknown as Component);
+    if (i >= 0) transcript.items.splice(i, 1);
+  };
+  const openPicker = (startAt?: number) => {
     const sessions = listBotSessions();
     if (!sessions.length) {
       push(dim("  （还没有历史会话）"));
@@ -322,15 +327,23 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       }),
     ];
     const list = new SelectList(items, Math.min(items.length, 12), THEME);
+    list.onSelectionChange = (it: { value: string }) => (pickerSel = it.value);
+    if (startAt !== undefined) {
+      const idx = items.findIndex((it) => it.value === startAt);
+      list.setSelectedIndex(idx >= 0 ? idx : 0);
+    }
     list.onSelect = (it: { value: string }) => {
       picker = undefined;
+      pickerKind = undefined;
       if (it.value !== "__cancel") resumeSession(it.value);
       tui.requestRender();
     };
     list.onCancel = () => {
       picker = undefined;
+      pickerKind = undefined;
       tui.requestRender();
     };
+    removePickerItem();
     picker = list;
     pickerKind = "sessions";
     deleteArmed = undefined;
@@ -583,7 +596,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           if (it.value !== "__cancel") {
             mode = it.value as Mode;
             setSessionMode(sessionId, mode);
-            push(dim(`  终端模式已切换：${modeLabel(mode)}（下一次对话生效）`), "");
+            push(dim(`  终端模式已切换：${modeLabel(mode)}（立即生效）`), "");
           }
           tui.requestRender();
         };
@@ -598,7 +611,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         return;
       }
       else if (cmd === "new") {
-        sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者" }).id;
+        sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者", mode }).id;
         transcript.items = [...pushIntro(cfg.model, cwd), ""];
         appendEvent(sessionId, { t: "intro", at: new Date().toISOString(), cwd, model: cfg.model, tier: "阅读者" });
         usage = undefined;
@@ -689,15 +702,25 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           }
           const r = trashSession(id);
           deleteArmed = undefined;
-          if (r.ok) {
-            picker = undefined;
-            transcript.items = [dim(`  已删除会话 ${id}（移入 .trash，可手动恢复）`)];
-            if (id === sessionId) sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
-            refresh();
-          } else {
+          if (!r.ok) {
             push(fg("31", `  删除失败：${r.error ?? "未知错误"}`));
             refresh();
+            return;
           }
+          push(dim(`  已删除会话 ${id}（移入 .trash，可手动恢复）——可继续删除，esc 返回`));
+          if (id === sessionId) {
+            // 删的是当前会话：静默新开一个（继承模式），回到聊天时是干净的新会话
+            sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
+            setSessionMode(sessionId, mode);
+            transcript.items = [];
+            usage = undefined;
+            prevHistory = undefined;
+            prefixStable = undefined;
+            foldCount = 0;
+            summaryActive = false;
+          }
+          const keep = pickerSel; // 记住选中项，重开列表后恢复位置
+          openPicker(keep); // 留在列表里，可连续删除
           return;
         }
         if (deleteArmed) {

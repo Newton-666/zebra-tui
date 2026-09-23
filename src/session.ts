@@ -33,10 +33,10 @@ const metaFile = (id: string) => path.join(dirOf(id), "bot.json");
 
 export const newBotSessionId = (d = new Date()) => `bot-${d.toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
 
-export function createBotSession(opts: { cwd: string; model: string; tier: string; id?: string }): BotMeta {
+export function createBotSession(opts: { cwd: string; model: string; tier: string; mode?: "readonly" | "full"; id?: string }): BotMeta {
   const id = opts.id ?? newBotSessionId();
   const at = new Date().toISOString();
-  const meta: BotMeta = { id, kind: "bot", cwd: opts.cwd, model: opts.model, tier: opts.tier, createdAt: at, updatedAt: at };
+  const meta: BotMeta = { id, kind: "bot", cwd: opts.cwd, model: opts.model, tier: opts.tier, mode: opts.mode ?? "readonly", createdAt: at, updatedAt: at };
   fs.mkdirSync(dirOf(id), { recursive: true });
   fs.writeFileSync(metaFile(id), `${JSON.stringify(meta, null, 2)}\n`);
   appendEvent(id, { t: "meta", at, cwd: opts.cwd, model: opts.model, tier: opts.tier });
