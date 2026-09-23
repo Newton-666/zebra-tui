@@ -385,7 +385,7 @@ class Wizard implements Component, Focusable {
         label: cfg ? "重新配置" : "配置",
         description: cfg
           ? `${cfg.baseUrl} · ${maskKey(cfg.apiKey)} · ${cfg.model}`
-          : "Base URL / API Key / 模型名，测试通过后保存",
+          : "选提供商 · 填 API Key · 动态拉模型，测试通过后保存",
       },
       ...(cfg
         ? [{ value: "clear", label: "清除配置", description: "回到未配置状态（一句话建队会要求先配置）" }]

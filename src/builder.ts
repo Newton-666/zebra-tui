@@ -119,6 +119,8 @@ export interface ChatOptions {
   timeoutMs?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** 连接测试用：HTTP 200 且无 error 字段即算通过（思考型模型可能把 token 全花在推理上，content 为空是正常的） */
+  lenient?: boolean;
 }
 
 /** OpenAI 兼容 chat completions（非流式——搭建期一次性调用足够） */
@@ -132,7 +134,7 @@ export async function chat(cfg: BuilderConfig, prompt: string, opts: ChatOptions
         model: cfg.model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.4,
-        max_tokens: opts.maxTokens ?? 2048,
+        max_tokens: opts.maxTokens ?? 4096,
       }),
       signal: opts.signal ?? AbortSignal.timeout(opts.timeoutMs ?? 180_000),
     });
@@ -142,10 +144,25 @@ export async function chat(cfg: BuilderConfig, prompt: string, opts: ChatOptions
   }
   if (!res.ok) throw friendlyHttp(res.status, await res.text().catch(() => ""));
   const data = (await res.json().catch(() => undefined)) as
-    | { choices?: { message?: { content?: unknown } }[] }
+    | { error?: unknown; choices?: { message?: { content?: unknown; reasoning_content?: unknown } }[] }
     | undefined;
-  const text = data?.choices?.[0]?.message?.content;
-  if (typeof text !== "string" || !text.trim()) throw new Error("平台模型返回为空（确认该模型是 chat 类型）");
+  // 有些代理 HTTP 200 也把错误放进 body
+  const errField = data?.error;
+  if (errField) {
+    const m = (errField as { message?: unknown })?.message;
+    throw new Error(`端点返回错误：${String(m ?? JSON.stringify(errField)).slice(0, 160)}`);
+  }
+  const msg0 = data?.choices?.[0]?.message;
+  // 思考型模型（如 GLM-4.5/4.6/4.7 默认开思考）：content 可能空，推理文本在 reasoning_content
+  const text =
+    typeof msg0?.content === "string" && msg0.content.trim()
+      ? msg0.content
+      : typeof msg0?.reasoning_content === "string"
+        ? msg0.reasoning_content
+        : "";
+  if (!opts.lenient && !text.trim()) {
+    throw new Error("平台模型返回为空——若选的是思考型模型，请增大 max_tokens 或换非思考模型");
+  }
   return text;
 }
 
@@ -157,7 +174,7 @@ function friendlyHttp(status: number, body: string): Error {
   return new Error(`平台模型 HTTP ${status}${hint ? `：${hint}` : ""}`);
 }
 
-/** 连接测试：一个几十 token 的最小请求；测试通过才允许保存 */
+/** 连接测试：几十 token 的最小请求；HTTP 200 且无 error 字段即通过（不要求 content 非空——思考型模型会把 token 花在推理上） */
 export async function testBuilder(cfg: BuilderConfig, signal?: AbortSignal): Promise<void> {
-  await chat(cfg, "连接测试，请只回复两个字母：ok", { timeoutMs: 30_000, maxTokens: 8, signal });
+  await chat(cfg, "连接测试，请只回复两个字母：ok", { timeoutMs: 30_000, maxTokens: 64, signal, lenient: true });
 }
