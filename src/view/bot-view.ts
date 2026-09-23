@@ -11,11 +11,12 @@ import {
   matchesKey,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type EditorTheme,
   type MarkdownTheme,
 } from "../../deps/pi-tui/dist/index.js";
-import { BLUE_LIGHT, bold, dim, fg } from "../ui/ansi.ts";
+import { BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { loadBuilder, type BuilderConfig } from "../builder.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
@@ -49,14 +50,29 @@ const BOT_THEME: MarkdownTheme = {
 };
 
 class Transcript implements Component {
-  items: (string | Markdown)[] = [];
+  items: (string | Component)[] = [];
   render(w: number): string[] {
     const out: string[] = [];
     for (const it of this.items) {
-      if (typeof it === "string") out.push(truncateToWidth(it, w, "…"));
-      else out.push(...it.render(w));
+      const lines = typeof it === "string" ? [it] : it.render(w);
+      // 关键：任何来源的行都不允许超过宽度——Markdown 表格不折行，
+      // 超宽会让合成器写出屏幕边界 → 整屏错乱、输入框消失
+      for (const l of lines) out.push(truncateToWidth(l, w, ""));
     }
     return out;
+  }
+  invalidate(): void {}
+}
+
+/** 用户消息：平台胶囊风格蓝底块（pi 风格的块；ScrollView 不保留整宽尾随空格，故宽度随内容） */
+class UserBlock implements Component {
+  private text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+  render(w: number): string[] {
+    const inner = Math.max(8, w - 6);
+    return wrapTextWithAnsi(this.text, inner).map((r) => chip(" " + r + " ", "48;5;24", "38;5;255"));
   }
   invalidate(): void {}
 }
@@ -100,7 +116,7 @@ export async function runBotFlow(cwd: string): Promise<void> {
       const out = [dim("╭" + "─".repeat(inner) + "╮")];
       for (let r = 0; r < LOGO_ROWS.length; r++) {
         const logo = fg(KRYSTAL_GRADIENT[r]!, LOGO_ROWS[r]!);
-        const content = side ? ` ${logo}${pad(logo, LOGO_WIDTH)}  ${tag[r] ?? ""}` : ` ${logo}`;
+        const content = side ? ` ${pad(logo, LOGO_WIDTH)}  ${tag[r] ?? ""}` : ` ${logo}`;
         out.push(dim("│") + pad(truncateToWidth(content, inner, "…"), inner) + dim("│"));
       }
       out.push(dim("╰" + "─".repeat(inner) + "╯"));
@@ -216,8 +232,8 @@ export async function runBotFlow(cwd: string): Promise<void> {
     const body = text.trim();
     if (!body) return;
     clearEditor();
-    // pi 风格：提交后输入框清空，消息作为「块」落入对话区（左侧竖线 + 青色前缀）
-    push(fg("36", " ▌") + fg("36", " 你") + "", fg("36", " ▌") + " " + body, "");
+    // pi 风格：消息以「整宽蓝色背景块」落入对话区
+    push(new UserBlock(body));
     runTurn(body);
   };
 
