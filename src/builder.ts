@@ -75,6 +75,46 @@ export function maskKey(k: string): string {
   return k.length > 10 ? `${k.slice(0, 7)}…${k.slice(-4)}` : "•".repeat(k.length);
 }
 
+/** 预设 provider（baseUrl 是数据；模型列表动态拉取，provider 上新无需改 Krystal） */
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  baseUrl: string;
+}
+
+export const PROVIDER_PRESETS: ProviderPreset[] = [
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
+  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
+  { id: "moonshot", label: "Moonshot（Kimi）", baseUrl: "https://api.moonshot.cn/v1" },
+  { id: "qwen", label: "通义千问（DashScope 兼容）", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { id: "zhipu", label: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
+  { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "ollama", label: "Ollama（本机）", baseUrl: "http://localhost:11434/v1" },
+  { id: "lmstudio", label: "LM Studio（本机）", baseUrl: "http://localhost:1234/v1" },
+];
+
+/** 动态拉取模型列表（GET /models）——provider 侧上新模型自动可见 */
+export async function fetchModels(
+  cfg: { baseUrl: string; apiKey: string },
+  signal?: AbortSignal,
+): Promise<string[]> {
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.baseUrl}/models`, {
+      headers: { authorization: `Bearer ${cfg.apiKey}` },
+      signal: signal ?? AbortSignal.timeout(15_000),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(/timeout|abort|TimeoutError/i.test(msg) ? "拉取超时——检查网络" : `连接失败：${msg}`);
+  }
+  if (!res.ok) throw friendlyHttp(res.status, await res.text().catch(() => ""));
+  const data = (await res.json().catch(() => undefined)) as { data?: { id?: unknown }[] } | undefined;
+  const ids = (data?.data ?? []).map((m) => String(m?.id ?? "")).filter(Boolean).sort();
+  if (!ids.length) throw new Error("端点返回了空模型列表——确认 baseUrl 正确，或改用手动输入模型 id");
+  return ids;
+}
+
 export interface ChatOptions {
   timeoutMs?: number;
   maxTokens?: number;

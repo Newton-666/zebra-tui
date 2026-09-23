@@ -16,7 +16,7 @@ import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { DEFAULT_COMMANDS, MEMBER_COLORS, type Member, type MemberType, type TeamConfig } from "../types.ts";
 import { listSessions, newSessionId } from "../team.ts";
 import { generateTeamSpec, type TeamSpec } from "../generator.ts";
-import { clearBuilder, loadBuilder, maskKey, saveBuilder, testBuilder, type BuilderConfig } from "../builder.ts";
+import { clearBuilder, fetchModels, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, testBuilder, type BuilderConfig } from "../builder.ts";
 import { discoverModelGroups, withModel, type ModelGroup } from "../models.ts";
 
 const THEME = {
@@ -44,9 +44,12 @@ type Step =
   | "genLoading"
   | "genConfirm"
   | "builderMenu"
+  | "builderProvider"
   | "builderUrl"
   | "builderKey"
-  | "builderModel"
+  | "builderFetch"
+  | "builderPick"
+  | "builderModelInput"
   | "builderTesting";
 
 const TYPE_ITEMS: { value: MemberType; label: string; description: string }[] = [
@@ -101,6 +104,9 @@ class Wizard implements Component, Focusable {
   private builderAbort: AbortController | undefined;
   private builderModel = ""; // genLoading 展示用
   private builderDraft: Partial<BuilderConfig> = {};
+  private builderProviderLabel = ""; // 仅展示用
+  private builderModels: string[] = []; // 动态拉取的模型列表
+  private builderModelsAbort: AbortController | undefined;
 
   constructor(tui: TUI, cwd: string) {
     this.tui = tui;
@@ -167,11 +173,13 @@ class Wizard implements Component, Focusable {
     if (this.step !== "mode") out.push(truncateToWidth(dim(this.instr), width));
     if (this.step === "mode") out.push(dim(" 选择模式："));
     out.push(rule(width));
-    if (this.step === "genLoading" || this.step === "builderTesting") {
+    if (this.step === "genLoading" || this.step === "builderTesting" || this.step === "builderFetch") {
       const sp = SPINNER[this.spinnerFrame % SPINNER.length]!;
       if (this.step === "genLoading") {
         out.push(truncateToWidth(` ${fg("36", sp)} 平台模型 ${bold(this.builderModel)} 整理中…（esc 取消）`, width));
         out.push(truncateToWidth(dim(` 描述：${this.genDesc}`), width));
+      } else if (this.step === "builderFetch") {
+        out.push(truncateToWidth(` ${fg("36", sp)} 正在拉取模型列表 ${this.builderDraft.baseUrl ?? ""}…（esc 取消）`, width));
       } else {
         out.push(
           truncateToWidth(
@@ -386,7 +394,7 @@ class Wizard implements Component, Focusable {
     ];
     const list = new SelectList(items, items.length, THEME);
     list.onSelect = this.safe((item: { value: string }) => {
-      if (item.value === "edit") this.showBuilderUrl();
+      if (item.value === "edit") this.showBuilderProvider();
       else if (item.value === "clear") {
         clearBuilder();
         this.showBuilder();
@@ -402,17 +410,47 @@ class Wizard implements Component, Focusable {
     );
   }
 
+  private showBuilderProvider(): void {
+    this.builderDraft = loadBuilder() ?? {}; // 保留旧 key/模型做预填
+    const items = [
+      ...PROVIDER_PRESETS.map((p) => ({ value: p.id, label: p.label, description: p.baseUrl })),
+      { value: "__custom", label: "自定义 Base URL…", description: "任何 OpenAI 兼容端点" },
+      { value: "__back", label: "返回" },
+    ];
+    const list = new SelectList(items, Math.min(items.length, 12), THEME);
+    list.onSelect = this.safe((item: { value: string }) => {
+      if (item.value === "__back") {
+        this.showBuilder();
+        return;
+      }
+      const preset = PROVIDER_PRESETS.find((p) => p.id === item.value);
+      if (preset) {
+        this.builderProviderLabel = preset.label;
+        this.builderDraft.baseUrl = preset.baseUrl;
+        this.showBuilderKey();
+      } else {
+        this.showBuilderUrl();
+      }
+    });
+    list.onCancel = () => this.showBuilder();
+    this.setActive(
+      list,
+      "builderProvider",
+      "选择模型提供商（模型列表动态拉取，provider 上新无需更新 Krystal）",
+    );
+  }
+
   private showBuilderUrl(): void {
-    this.builderDraft = loadBuilder() ?? {};
     const input = new Input();
     if (this.builderDraft.baseUrl) input.setValue(this.builderDraft.baseUrl);
     input.onSubmit = this.safe(() => {
       const v = input.getValue().trim();
       if (!v) return;
+      this.builderProviderLabel = "自定义";
       this.builderDraft.baseUrl = v;
       this.showBuilderKey();
     });
-    input.onEscape = () => this.showBuilder();
+    input.onEscape = () => this.showBuilderProvider();
     this.setActive(input, "builderUrl", "Base URL（OpenAI 兼容根地址，含 /v1，例：https://api.example.com/v1）");
   }
 
@@ -420,16 +458,72 @@ class Wizard implements Component, Focusable {
     const input = new Input();
     if (this.builderDraft.apiKey) input.setValue(this.builderDraft.apiKey);
     input.onSubmit = this.safe(() => {
-      const v = input.getValue().trim();
-      if (!v) return;
+      const v = input.getValue().trim() || "none"; // 本地服务（如 Ollama）不需要真 key，留空则占位
       this.builderDraft.apiKey = v;
-      this.showBuilderModel();
+      this.startFetchModels();
     });
-    input.onEscape = () => this.showBuilderUrl();
-    this.setActive(input, "builderKey", "API Key（输入不回显打码，仅保存在本机 ~/.krystal/config.json）");
+    input.onEscape = () => this.showBuilderProvider();
+    this.setActive(input, "builderKey", "API Key（唯一必填项；本地服务如 Ollama 可留空回车。仅存本机 ~/.krystal/config.json）");
   }
 
-  private showBuilderModel(): void {
+  private startFetchModels(): void {
+    const cfg = this.builderDraft as BuilderConfig;
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      this.showBuilderKey();
+      this.error = "先填 API Key";
+      return;
+    }
+    this.stopSpinner();
+    this.step = "builderFetch";
+    this.instr = "拉取模型";
+    this.error = "";
+    this.spinnerFrame = 0;
+    this.builderModelsAbort = new AbortController();
+    this.spinnerTimer = setInterval(() => {
+      this.spinnerFrame++;
+      this.tui.requestRender();
+    }, 90);
+    this.spinnerTimer.unref?.();
+    this.tui.requestRender();
+    void fetchModels(cfg, this.builderModelsAbort.signal)
+      .then((models) => {
+        this.stopSpinner();
+        this.builderModelsAbort = undefined;
+        this.builderModels = models;
+        this.showBuilderPick();
+      })
+      .catch((e: unknown) => {
+        this.stopSpinner();
+        this.builderModelsAbort = undefined;
+        this.showBuilderModelInput();
+        this.error = `拉取模型列表失败（可直接手输模型 id）：${e instanceof Error ? e.message : String(e)}`;
+      });
+  }
+
+  private showBuilderPick(): void {
+    const items = [
+      ...this.builderModels.map((m) => ({ value: m, label: m, description: "" })),
+      { value: "__manual", label: "手动输入模型 id…", description: "列表里没有时使用" },
+      { value: "__back", label: "返回" },
+    ];
+    const list = new SelectList(items, Math.min(items.length, 14), THEME);
+    list.onSelect = this.safe((item: { value: string }) => {
+      if (item.value === "__back") {
+        this.showBuilderKey();
+        return;
+      }
+      if (item.value === "__manual") {
+        this.showBuilderModelInput();
+        return;
+      }
+      this.builderDraft.model = item.value;
+      this.testAndSave();
+    });
+    list.onCancel = () => this.showBuilderKey();
+    this.setActive(list, "builderPick", `选择模型（来自 ${this.builderProviderLabel || this.builderDraft.baseUrl}，动态拉取）`);
+  }
+
+  private showBuilderModelInput(): void {
     const input = new Input();
     if (this.builderDraft.model) input.setValue(this.builderDraft.model);
     input.onSubmit = this.safe(() => {
@@ -438,8 +532,8 @@ class Wizard implements Component, Focusable {
       this.builderDraft.model = v;
       this.testAndSave();
     });
-    input.onEscape = () => this.showBuilderKey();
-    this.setActive(input, "builderModel", "模型 id（回车开始测试连接，通过后才保存）");
+    input.onEscape = () => (this.builderModels.length ? this.showBuilderPick() : this.showBuilderKey());
+    this.setActive(input, "builderModelInput", "模型 id（回车开始测试连接，通过后才保存）");
   }
 
   private testAndSave(): void {
@@ -699,6 +793,16 @@ class Wizard implements Component, Focusable {
         this.stopSpinner();
         this.showBuilder();
         this.error = "已取消测试";
+      }
+      return;
+    }
+    if (this.step === "builderFetch") {
+      if (matchesKey(data, "escape")) {
+        this.builderModelsAbort?.abort();
+        this.builderModelsAbort = undefined;
+        this.stopSpinner();
+        this.showBuilderKey();
+        this.error = "已取消拉取";
       }
       return;
     }
