@@ -75,7 +75,7 @@ export class ModelPicker implements Component {
     this.step = "source";
     this.groups = discoverModelGroups(m.type);
     this.title = `选择模型来源 · ${m.name}`;
-    this.subtitle = `当前: ${m.model ?? "默认"} · 来自 ${m.type} 的配置`;
+    this.subtitle = `当前 ${m.model ?? "默认"} · 来源选 ${m.type} 的配置`;
     const items = [
       { value: "__none", label: "默认（不指定模型）", description: `跟随 ${m.type} 自身配置` },
       ...this.groups.map((g, i) => ({
@@ -134,7 +134,7 @@ export class ModelPicker implements Component {
     };
 
     const body: string[] = [];
-    body.push(dim(` 当前: ${this.subtitle}`));
+    body.push(dim(` ${this.subtitle}`));
     body.push(...(this.list?.render(inner) ?? []));
     const rows = body.map((l) => bg(PANEL, fg(BORDER, "│") + padTo(l, inner) + fg(BORDER, "│")));
     return [
