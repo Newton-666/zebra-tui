@@ -1,6 +1,6 @@
 // Krystal — 模型选择弹窗（overlay）：成员 → 来源 → 模型
 import { SelectList, truncateToWidth, type Component } from "../../deps/pi-tui/dist/index.js";
-import { bold, dim, fg } from "../ui/ansi.ts";
+import { bg, bold, dim, fg } from "../ui/ansi.ts";
 import { discoverModelGroups, type ModelGroup } from "../models.ts";
 import type { Member } from "../types.ts";
 
@@ -117,14 +117,31 @@ export class ModelPicker implements Component {
     );
   }
 
+  /** 实心面板：圆角边框 + 深色底 + 标题栏（避免和背后的会话文字糊在一起） */
   render(width: number): string[] {
-    const inner = Math.max(20, width);
-    const out: string[] = [];
-    out.push(bold(truncateToWidth(` ${this.title}`, inner, "…")));
-    out.push(dim(truncateToWidth(` ${this.subtitle}`, inner, "…")));
-    out.push(...(this.list?.render(inner) ?? []));
-    out.push(dim(" ↑↓ 选择 · enter 确认 · esc 返回/取消"));
-    return out;
+    const inner = Math.max(24, width - 2);
+    const PANEL = "48;5;236"; // 深灰底
+    const BORDER = "38;5;45"; // 浅蓝边框
+    const stripErase = (s: string) => s.replace(/\x1b\[K/g, "");
+    const padTo = (s: string, w: number) => {
+      const t = truncateToWidth(stripErase(s), w, "");
+      const vis = t.replace(/\x1b\[[0-9;]*m/g, "").length;
+      return t + " ".repeat(Math.max(0, w - vis));
+    };
+    const rule = (label: string, left: string, right: string) => {
+      const fill = Math.max(1, inner - 3 - label.length);
+      return bg(PANEL, fg(BORDER, `${left}─ `) + label + fg(BORDER, ` ${"─".repeat(fill)}${right}`));
+    };
+
+    const body: string[] = [];
+    body.push(dim(` 当前: ${this.subtitle}`));
+    body.push(...(this.list?.render(inner) ?? []));
+    const rows = body.map((l) => bg(PANEL, fg(BORDER, "│") + padTo(l, inner) + fg(BORDER, "│")));
+    return [
+      rule(bold(this.title), "╭", "╮"),
+      ...rows,
+      rule(dim("↑↓ 选择 · enter 确认 · esc 返回/取消"), "╰", "╯"),
+    ];
   }
 
   handleInput(data: string): void {

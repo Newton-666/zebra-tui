@@ -236,13 +236,14 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   };
 
   const COMMAND_HELP =
-    "命令: :model [成员] [模型] 换模型 · :to [成员] 锁定目标 · :brief [成员] 重发身份简报 · :team 重建引擎 · :help · :quit";
+    "命令: :model 换模型 · :role <成员> <一句话> 设身份 · :to [成员] 锁定 · :brief 重发简报 · :team 重建 · :help · :quit";
   const COMMAND_HELP_FULL = [
     "Krystal 命令（: 与 / 等价）",
     "  :model                 查看各成员当前模型",
     "  :model <成员>           查看该成员可选的模型来源",
     "  :model <成员> <模型>     切换该成员模型（重启窗格并重注入身份）",
     "  :to [成员|all]         锁定默认目标（不加 @ 时发给谁）",
+    "  :role <成员> <一句话>   设定/修改该成员的身份并立即注入",
     "  :brief [成员]          重发身份与团队简报",
     "  :team                  tmux 引擎丢失时重建",
     "  :help                  本帮助      :quit  退出",
@@ -266,7 +267,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     if (trimmed.startsWith(":")) {
       // 已知命令处理；未知命令只提示、绝不广播给成员
       const word = trimmed.split(/\s+/)[0]!;
-      const known = [":quit", ":q", ":to", ":brief", ":model", ":team", ":help", ":h"];
+      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":team", ":help", ":h"];
       if (!known.includes(word) && !known.some((k) => word.startsWith(k))) {
         lastAction = `未知命令 ${word}（${COMMAND_HELP}）`;
         renderStatus();
@@ -312,6 +313,36 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       }
       lastAction = `已向 ${n} 名成员重发团队简报`;
       saveTeamConfig(config);
+      renderStatus();
+      return;
+    }
+    if (trimmed === ":role" || trimmed.startsWith(":role ")) {
+      const [, memberArg, ...rest] = trimmed.split(/\s+/);
+      if (!memberArg) {
+        const cur = config.members.map((m) => `${m.name}:${m.role ? "有" : "空"}`).join(" · ");
+        lastAction = `身份（:role <成员> <一句话>）: ${cur}`;
+        renderStatus();
+        return;
+      }
+      const m = config.members.find((x) => x.name === memberArg || x.id === memberArg);
+      if (!m) {
+        lastAction = `未知成员: ${memberArg}`;
+        renderStatus();
+        return;
+      }
+      const text = rest.join(" ").trim();
+      if (!text) {
+        lastAction = `用法: :role ${m.name} <一句话身份/职责>`;
+        renderStatus();
+        return;
+      }
+      m.role = text.slice(0, 400);
+      saveTeamConfig(config);
+      // 立即把新身份注给该成员（上下文里就此带上它的职责）
+      const pane = paneIds[config.members.indexOf(m)];
+      const ok = pane ? injectIdentity(m) : false;
+      if (!ok) pendingIdentity.add(m.id); // 窗格没就绪 → 下一轮注入
+      lastAction = `${m.name} 身份已设定${ok ? "并注入" : "（待窗格就绪后注入）"}`;
       renderStatus();
       return;
     }

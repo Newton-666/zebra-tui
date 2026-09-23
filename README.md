@@ -88,6 +88,8 @@ ln -sf "$PWD/zebra" ~/.local/bin/krystal
 
 要求：`tmux`、Node ≥ 22.6（跑 TypeScript 用 `--experimental-strip-types`）。
 
+团队数据都在 `sessions/`；测试可用 `KRISTAL_SESSIONS_DIR` 指到别处（冒烟测试默认已隔离）。
+
 ## 用法
 
 命令前缀 `:` 与 `/` 等价（`:model` = `/model`）；**未知命令只会提示，不会广播给成员**，
@@ -101,6 +103,7 @@ ln -sf "$PWD/zebra" ~/.local/bin/krystal
 | `:to <name>` | 锁定默认目标（`◈` 标记，`:to all` 解除） |
 | `:model` | 打开模型选择弹窗（成员 → 来源 → 模型）；`:model <成员>` 直达该成员的来源 |
 | `:model <name> <模型>` | 运行时切换该成员模型：用新命令重启它的窗格并重新注入身份 |
+| `:role <name> <一句话>` | 设定/修改该成员的身份（写入 `team.json` 并立即重新注入） |
 | `:brief` | 重发身份与团队简报（`:brief <name>` 只发给某成员） |
 | `:team` | tmux 引擎丢失时重建 |
 | `:help` | 命令与快捷键帮助（浮层） |
@@ -221,7 +224,7 @@ name / type / command（启动）/ resumeCommand（恢复）/ color / role（身
 ## 开发
 
 ```bash
-npm run smoke    # 引擎 + 存储冒烟测试（无需 TTY）
+npm run smoke    # 引擎 + 存储冒烟测试（无需 TTY；用 /tmp 隔离会话目录，不碰真实团队数据）
 node --experimental-strip-types src/main.ts
 ```
 
@@ -248,6 +251,7 @@ src/
 每一版都提交到 git。
 
 - **v0.4.3** — `:model` 改为**弹窗选择器**（overlay：成员 → 来源 → 模型，↑↓/enter/esc）；保留 `:model <成员> <模型>` 命令行用法；新增 TODO.md
+- **v0.4.3** — `:model` 弹窗（成员 → 来源 → 模型，带上下文长度/来源提示）、`:role` 随时补改成员身份并立即重注入、会话目录可用 `KRISTAL_SESSIONS_DIR` 隔离（测试不再碰真实团队数据）
 - **v0.4.2** — 命令体验：`/` 与 `:` 等价、未知命令只提示不广播（防止把 `/model` 之类误发进成员会话）、新增 `:help` 浮层帮助
 - **v0.4.1** — 每格独立滚动 + 快照历史（cell 累积画面快照并智能去抖：末帧原地更新、差异大才追加，向上滚可回看历史）；模型来源按当前 provider 排序并标注其他来源
 - **v0.4.0** — 模型选择：建队向导新增「来源 → 模型」两级选择（读取各 agent 自身配置，含默认/自定义）+ 运行时 `:model <成员> <模型>` 切换（重启窗格并重注入身份）+ 模型拼接进启动/恢复命令

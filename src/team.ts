@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import type { HistoryEvent, TeamConfig } from "./types.ts";
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const SESSIONS_DIR = path.join(PROJECT_ROOT, "sessions");
+// 会话目录：默认 <root>/sessions；测试可用 KRISTAL_SESSIONS_DIR 指到别处，
+// 避免任何清理/冒烟测试碰到真实团队数据
+export const SESSIONS_DIR = process.env.KRISTAL_SESSIONS_DIR
+  ? path.resolve(process.env.KRISTAL_SESSIONS_DIR)
+  : path.join(PROJECT_ROOT, "sessions");
 
 export function listSessions(): TeamConfig[] {
   if (!fs.existsSync(SESSIONS_DIR)) return [];

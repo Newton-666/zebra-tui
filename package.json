@@ -4,9 +4,11 @@
   "description": "Zebra — multi-agent team cockpit TUI, built on pi-tui",
   "type": "module",
   "private": true,
-  "bin": { "zebra": "./zebra" },
+  "bin": {
+    "zebra": "./zebra"
+  },
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
-    "smoke": "node --experimental-strip-types scripts/smoke.ts"
+    "smoke": "KRISTAL_SESSIONS_DIR=/tmp/krystal-test-sessions node --experimental-strip-types --no-warnings scripts/smoke.ts"
   }
 }
