@@ -217,7 +217,8 @@ const SYSTEM = (cwd: string, tier: string) => `你是 Krystal Bot——Krystal �
 规则：
 - 调工具前先用一句话说明意图；工具输出会由系统回填给你
 - ${tier === "阅读者" ? "你是只读档位：只能查看，任何写操作都会被策略闸门拒绝——不要尝试" : "按档位白名单行事"}
-- 回答精炼，用中文；先给结论，再给依据（文件:行号）`;
+- 回答精炼，用中文；先给结论，再给依据（文件:行号）
+- 不使用 emoji（平台审美：纯文字/几何符号）`;
 
 export async function runBotTask(opts: {
   cfg: BuilderConfig;

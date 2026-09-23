@@ -17,7 +17,6 @@ import { DEFAULT_COMMANDS, MEMBER_COLORS, type Member, type MemberType, type Tea
 import { listSessions, newSessionId } from "../team.ts";
 import { generateTeamSpec, type TeamSpec } from "../generator.ts";
 import { clearBuilder, fetchModels, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, testBuilder, type BuilderConfig } from "../builder.ts";
-import { listBotSessions } from "../session.ts";
 import { discoverModelGroups, withModel, type ModelGroup } from "../models.ts";
 
 const THEME = {
@@ -52,8 +51,7 @@ type Step =
   | "builderFetch"
   | "builderPick"
   | "builderModelInput"
-  | "builderTesting"
-  | "botMenu";
+  | "builderTesting";
 
 const TYPE_ITEMS: { value: MemberType; label: string; description: string }[] = [
   { value: "pi", label: "pi", description: "pi coding agent" },
@@ -245,7 +243,7 @@ class Wizard implements Component, Focusable {
         if (!loadBuilder()) {
           this.showMode();
           this.error = "Krystal Bot 需要平台模型——先到 Platform model 配置";
-        } else this.showBotMenu();
+        } else this.onSubmitResult?.({ action: "bot" }); // 每次都是新界面；历史用 /resume 回溯
       }
       else if (item.value === "builder") this.showBuilder();
       else this.onSubmitResult?.({ action: "quit" });
@@ -278,37 +276,6 @@ class Wizard implements Component, Focusable {
     });
     list.onCancel = () => this.showMode();
     this.setActive(list, "chooser", "历史群聊（恢复团队视图与引擎）");
-  }
-
-  // ---------- Krystal Bot：续聊 / 新会话 ----------
-  private showBotMenu(): void {
-    const past = listBotSessions();
-    if (!past.length) {
-      this.onSubmitResult?.({ action: "bot" });
-      return;
-    }
-    const items = [
-      {
-        value: past[0]!.id,
-        label: "继续上次对话",
-        description: `${past[0]!.createdAt.slice(0, 16).replace("T", " ")} · ${past[0]!.model} · 共 ${past.length} 个会话`,
-      },
-      { value: "__new", label: "新会话", description: "开一段新的对话" },
-      ...past.slice(1, 6).map((m) => ({
-        value: m.id,
-        label: `更早：${m.createdAt.slice(0, 16).replace("T", " ")}`,
-        description: `${m.model} · ${m.cwd}`,
-      })),
-      { value: "__back", label: "返回" },
-    ];
-    const list = new SelectList(items, Math.min(items.length, 10), THEME);
-    list.onSelect = this.safe((item: { value: string }) => {
-      if (item.value === "__back") this.showMode();
-      else if (item.value === "__new") this.onSubmitResult?.({ action: "bot" });
-      else this.onSubmitResult?.({ action: "bot", resumeId: item.value });
-    });
-    list.onCancel = () => this.showMode();
-    this.setActive(list, "botMenu", "Krystal Bot（事件流已落盘，可继续上次对话）");
   }
 
   // ---------- 一句话建队 ----------

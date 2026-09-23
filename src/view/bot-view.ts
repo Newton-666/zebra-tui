@@ -4,6 +4,7 @@
 import {
   Editor,
   Markdown,
+  SelectList,
   ProcessTerminal,
   ScrollView,
   TuiAltScreen,
@@ -26,12 +27,20 @@ import {
   lastUsage,
   loadBotMeta,
   loadEvents,
+  listBotSessions,
   messagesFrom,
   touchSession,
 } from "../session.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
+const THEME = {
+  selectedPrefix: (t: string) => fg("36", t),
+  selectedText: (t: string) => bold(t),
+  description: (t: string) => dim(t),
+  scrollInfo: (t: string) => dim(t),
+  noMatch: (t: string) => fg("33", t),
+};
 const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
 
 /** 与主 app 同源：pi-tui 的 Editor 自己画上下两条线，颜色由 borderColor 决定（重画会被渲染层吃掉） */
@@ -198,9 +207,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   // ── 会话：续聊则重放事件（与中断前同一前缀 → 缓存立刻恢复），否则新开一个
   const resumed = resumeId ? loadBotMeta(resumeId) : undefined;
-  const sessionId = resumed?.id ?? createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
-  const events = resumed ? loadEvents(sessionId) : [];
-  let usage = resumed ? lastUsage(events) : undefined;
+  let sessionId = resumed?.id ?? createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者" }).id;
+  let usage = resumed ? lastUsage(loadEvents(sessionId)) : undefined;
+  let picker: SelectList | undefined;
   // 本地「前缀稳定性」：与上一回合的稳定前缀逐字节比对（provider 不报 cached_tokens 时的可靠判据）
   let prevHistory: unknown[] | undefined;
   let prefixStable: boolean | undefined;
@@ -221,9 +230,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   const abort = new AbortController();
 
   const modelLine = cfg ? `${cfg.model}` : "未配置平台模型——回首页 Platform model 配置";
-  if (resumed) {
+  /** 从事件流重建对话区（新会话为空；/resume 切换会话时复用） */
+  const rebuild = (id: string) => {
     const toolById = new Map<string, ToolBlock>();
-    for (const e of events) {
+    for (const e of loadEvents(id)) {
       if (e.t === "msg" && e.role === "user") transcript.items.push(new UserBlock(e.content), "");
       else if (e.t === "msg" && e.role === "assistant") {
         if (e.toolCalls?.length) {
@@ -239,7 +249,51 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         b?.setResult(!denied, denied, e.content.replace(/^\[策略闸门拒绝\] /, ""));
       }
     }
-  }
+  };
+  if (resumed) rebuild(sessionId);
+  /** 回溯历史（/resume）：清空对话区并重放所选会话 */
+  const resumeSession = (id: string) => {
+    sessionId = id;
+    transcript.items = [];
+    rebuild(id);
+    usage = lastUsage(loadEvents(id));
+    prevHistory = undefined;
+    prefixStable = undefined;
+    push(dim(`  已回溯到 ${id}`), "");
+    refresh();
+  };
+  const openPicker = () => {
+    const sessions = listBotSessions();
+    if (!sessions.length) {
+      push(dim("  （还没有历史会话）"));
+      return;
+    }
+    const items = [
+      { value: "__cancel", label: "取消", description: "回到当前会话" },
+      ...sessions.map((m) => {
+        const msgs = loadEvents(m.id).filter((e) => e.t === "msg");
+        const firstUser = msgs.find((e) => e.role === "user");
+        return {
+          value: m.id,
+          label: `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
+          description: `${m.model} · ${msgs.length} 条消息 · ${firstUser?.content.slice(0, 36) ?? "(空)"}`,
+        };
+      }),
+    ];
+    const list = new SelectList(items, Math.min(items.length, 12), THEME);
+    list.onSelect = (it: { value: string }) => {
+      picker = undefined;
+      if (it.value !== "__cancel") resumeSession(it.value);
+      tui.requestRender();
+    };
+    list.onCancel = () => {
+      picker = undefined;
+      tui.requestRender();
+    };
+    picker = list;
+    push("", dim("  回溯历史（↑↓ 选择 · enter 恢复 · esc 取消）"), list);
+    refresh();
+  };
 
   const headerComp: Component = {
     render(w: number): string[] {
@@ -271,7 +325,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const cache = usage && usage.cached > 0 ? `${Math.round((usage.cached / usage.prompt) * 100)}%` : "—";
       const tok = usage ? `${usage.prompt} tok` : `~${tokens.toFixed(0)} tok`;
       const pfx = prefixStable === undefined ? "前缀 —" : prefixStable ? "前缀 稳定" : "前缀 变化";
-      const seg = `state: ${busy ? state : "空闲"} · 上下文 ~${ctx}% · 缓存 ${cache} · ${pfx} · ${tok} · ${cfg?.model ?? ""}`;
+      const sid = sessionId.replace(/^bot-/, "").slice(0, 15);
+      const seg = `${sid} · ${busy ? state : "空闲"} · 上下文 ~${ctx}% · 缓存 ${cache} · ${pfx} · ${tok} · /resume 回溯`;
       return [truncateToWidth(` ${dim(`${seg} · esc 中断 · ctrl+c 退出`)}`, w)];
     },
     invalidate(): void {},
@@ -434,6 +489,28 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     if (busy || !cfg) return;
     const body = text.trim();
     if (!body) return;
+    // 命令前缀 / 与 : 等价（平台约定）；未知命令只提示，绝不发给模型
+    if (body.startsWith("/") || body.startsWith(":")) {
+      const cmd = body.slice(1).trim().toLowerCase();
+      clearEditor();
+      if (cmd === "resume" || cmd === "sessions") openPicker();
+      else if (cmd === "new") {
+        sessionId = createBotSession({ cwd, model: cfg.model, tier: "阅读者" }).id;
+        transcript.items = [];
+        usage = undefined;
+        prevHistory = undefined;
+        prefixStable = undefined;
+        push(dim("  新会话已开始"), "");
+        refresh();
+      } else if (cmd === "help") {
+        push(dim("  /resume 回溯历史 · /new 新会话 · esc 中断 · ctrl+c 退出"), "");
+        refresh();
+      } else {
+        push(dim(`  未知命令 ${body}（可用 /resume · /new · /help）`), "");
+        refresh();
+      }
+      return;
+    }
     clearEditor();
     // pi 风格：消息以「整宽蓝色背景块」落入对话区（块后留一空行）
     push(new UserBlock(body), "");
@@ -463,6 +540,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         } else {
           quit();
         }
+        return;
+      }
+      if (picker) {
+        picker.handleInput(data);
         return;
       }
       editor.handleInput(data);
