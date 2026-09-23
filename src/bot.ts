@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
-import { assembleContext, summarize, withSystem } from "./context.ts";
+import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
 import { decide, modeLabel, type Mode } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
 import { about, addFact, adjustTrust, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts, supersedeFact } from "./memory.ts";
@@ -33,10 +33,14 @@ export const READER_TOOLS: BotTool[] = [
   },
   {
     name: "read_file",
-    description: "读文件前 32KB（相对当前工作目录，禁止越出工作目录）",
+    description: "读文件（相对当前工作目录，禁止越出工作目录）。默认前 2000 行；大文件用 offset/limit 分段读",
     parameters: {
       type: "object",
-      properties: { path: { type: "string", description: "文件路径" } },
+      properties: {
+        path: { type: "string", description: "文件路径" },
+        offset: { type: "number", description: "起始行（从 1 起，默认 1）" },
+        limit: { type: "number", description: "本次读的行数（默认 2000）" },
+      },
       required: ["path"],
     },
   },
@@ -63,7 +67,7 @@ export const READER_TOOLS: BotTool[] = [
   {
     name: "run_command",
     description:
-      "跑一条终端命令。只读模式：仅白名单（pwd/ls/cat/head/tail/grep/rg/find/wc/which/git status/log/diff/show/branch）。完全访问模式：白名单直通 + 灰名单（mkdir/touch/cp/mv/sed/构建测试/git add·commit 等）放行；删除类、覆盖已存在文件、提权、磁盘/系统级命令始终被黑名单拦截",
+      "跑一条终端命令。只读模式：仅白名单（pwd/ls/cat/head/tail/grep/rg/find/wc/which/stat/tree/jq 等 + git status/log/diff/show/branch），不接受管道/重定向。完全访问模式：白/灰名单直通（建改文件、构建测试、git add·commit 等），名单外的非破坏命令也放行；仅删除类（rm）、提权（sudo）、git push、磁盘/系统级命令被黑名单拦截",
     parameters: {
       type: "object",
       properties: { command: { type: "string", description: "命令行" } },
@@ -71,6 +75,40 @@ export const READER_TOOLS: BotTool[] = [
     },
   },
 ];
+
+/** 写装备（§9.2 档位授予）：只有完全访问档才发给模型 */
+const WRITER_TOOLS: BotTool[] = [
+  {
+    name: "write_file",
+    description: "整文件写入（覆盖；自动建父目录）。仅完全访问模式（/mode full）可用，限工作目录内",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径（相对当前工作目录）" },
+        content: { type: "string", description: "完整文件内容" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "edit_file",
+    description: "精确替换文件片段（oldText 须与文件内容逐字节一致且唯一；多处命中时补上下文，或 replace_all=true）。仅完全访问模式可用",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径（相对当前工作目录）" },
+        oldText: { type: "string", description: "要被替换的原文（精确匹配）" },
+        newText: { type: "string", description: "替换后的文本（删除则传空串）" },
+        replace_all: { type: "boolean", description: "替换全部匹配（默认要求唯一匹配）" },
+      },
+      required: ["path", "oldText", "newText"],
+    },
+  },
+];
+
+/** 装备按档位授予（§9.2：同一个 agent，穿不同装备） */
+export const TOOLS_FOR = (mode: Mode): BotTool[] =>
+  mode === "full" ? [...READER_TOOLS, ...WRITER_TOOLS] : READER_TOOLS;
 
 // ---------- 档位闸门（§2.1 第一层：白名单，未列入 = 拒绝） ----------
 
@@ -86,7 +124,8 @@ export function commandAllowed(cmd: string): boolean {
   return READONLY_FIRST.has(parts[0]!);
 }
 
-const OUT_LIMIT = 4000;
+const OUT_LIMIT = Number(process.env.KRYSTAL_TOOL_OUT_MAX ?? 16_000);
+const CMD_TIMEOUT_MS = Number(process.env.KRYSTAL_CMD_TIMEOUT_MS ?? 120_000);
 
 // ── 失败重试（网络抖动是常态：自然化处理，不是复杂化）
 // 总尝试 3 次（首发 + 2 次重试），每次间隔 10 秒；三次都拉不起来就停下来报错。
@@ -131,15 +170,55 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
     }
     if (name === "read_file") {
       const file = rel(args.path, "");
-      if (!inside(file)) return { ok: false, denied: true, output: "越出工作目录（档位：阅读者）" };
+      if (!inside(file)) return { ok: false, denied: true, output: "越出工作目录" };
       const fh = await fs.promises.open(file, "r");
       try {
-        const buf = Buffer.alloc(32 * 1024);
-        const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-        return { ok: true, output: buf.toString("utf8", 0, bytesRead) + (bytesRead === buf.length ? "\n…（截断，前 32KB）" : "") };
+        const CAP = 256 * 1024;
+        const buf = Buffer.alloc(CAP);
+        const { bytesRead } = await fh.read(buf, 0, CAP, 0);
+        if (bytesRead === 0) return { ok: true, output: "（空文件）" };
+        const allLines = buf.toString("utf8", 0, bytesRead).split("\n");
+        const offset = Math.max(1, Math.floor(Number(args.offset ?? 1) || 1));
+        const limit = Math.max(1, Math.floor(Number(args.limit ?? 2000) || 2000));
+        const slice = allLines.slice(offset - 1, offset - 1 + limit);
+        const notes: string[] = [];
+        if (bytesRead === CAP) notes.push("…（截断，只读前 256KB）");
+        else if (offset - 1 + slice.length < allLines.length)
+          notes.push(`…（第 ${offset + slice.length - 1} 行之后未显示，可用 offset=${offset + slice.length} 续读）`);
+        return { ok: true, output: slice.join("\n") + (notes.length ? "\n" + notes.join(" ") : "") };
       } finally {
         await fh.close();
       }
+    }
+    if (name === "write_file") {
+      if (mode === "readonly") return { ok: false, denied: true, output: "只读模式：写文件需 /mode full" };
+      const file = rel(args.path, "");
+      if (!inside(file)) return { ok: false, denied: true, output: "越出工作目录" };
+      const content = String(args.content ?? "");
+      await fs.promises.mkdir(path.dirname(file), { recursive: true });
+      await fs.promises.writeFile(file, content, "utf8");
+      return { ok: true, output: `已写入 ${path.relative(cwd, file) || "."}（${content.split("\n").length} 行 / ${Buffer.byteLength(content)} 字节）` };
+    }
+    if (name === "edit_file") {
+      if (mode === "readonly") return { ok: false, denied: true, output: "只读模式：改文件需 /mode full" };
+      const file = rel(args.path, "");
+      if (!inside(file)) return { ok: false, denied: true, output: "越出工作目录" };
+      const oldText = String(args.oldText ?? "");
+      const newText = String(args.newText ?? "");
+      if (!oldText) return { ok: false, output: "oldText 不能为空" };
+      let src: string;
+      try {
+        src = await fs.promises.readFile(file, "utf8");
+      } catch {
+        return { ok: false, output: `读不到文件：${path.relative(cwd, file) || file}` };
+      }
+      const count = src.split(oldText).length - 1;
+      if (count === 0) return { ok: false, output: "oldText 未找到（须与文件内容逐字节一致——先 read_file 核对）" };
+      if (count > 1 && !args.replace_all)
+        return { ok: false, output: `oldText 匹配 ${count} 处——补充上下文使其唯一，或设 replace_all=true` };
+      const next = args.replace_all ? src.split(oldText).join(newText) : src.replace(oldText, newText);
+      await fs.promises.writeFile(file, next, "utf8");
+      return { ok: true, output: `已编辑 ${path.relative(cwd, file) || "."}（替换 ${args.replace_all ? count : 1} 处）` };
     }
     if (name === "memory") {
       // 记忆是平台原语（不是文件系统操作）→ 不受只读档位限制；写入的是记忆库，不是仓库
@@ -190,7 +269,7 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
       const cmd = String(args.command ?? "");
       const d = decide(cmd, mode, cwd);
       if (!d.allow) return { ok: false, denied: true, output: `策略闸门拒绝［${d.list}］${d.reason ?? ""}：${cmd.slice(0, 80)}` };
-      const r = await execAsync(cmd, { cwd, timeout: 15_000, maxBuffer: 1024 * 1024 });
+      const r = await execAsync(cmd, { cwd, timeout: CMD_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 });
       const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
       return { ok: true, output: out.slice(0, OUT_LIMIT) + (out.length > OUT_LIMIT ? "…（截断）" : "") || "（无输出）" };
     }
@@ -318,12 +397,13 @@ export type BotEvent =
 
 const SYSTEM = (cwd: string, tier: string, mode: Mode = "readonly") => `你是 Krystal Bot——Krystal 平台的原生成员。
 工作目录：${cwd}
-当前档位：${tier}
+当前档位：${tier}（终端模式：${modeLabel(mode)}）
 规则：
 - 调工具前先用一句话说明意图；工具输出会由系统回填给你
-- 当前终端模式：${modeLabel(mode)}${mode === "readonly"
-  ? "（只读）：只能查看，写类命令会被闸门拒绝——不要尝试"
-  : "：白名单直通；灰名单（建/改文件、git add/commit 等）放行，但**删除类与覆盖已存在文件会被黑名单拦截**；要删东西请让人来做"}
+- 终端模式：${modeLabel(mode)}${mode === "readonly"
+  ? "（只读）：只能查看与跑白名单命令，写文件/写类命令会被拒绝——不要尝试"
+  : "（完全访问）：可用 write_file/edit_file 改文件；run_command 白/灰名单直通、名单外的非破坏命令也放行；仅删除类（rm）、提权（sudo）、git push、系统级命令被黑名单拦截——改完记得验证（构建/测试）"}
+- 像真正的工程师一样干活：多步查证（read_file 可 offset/limit 分段），动手前先看清现状
 - 回答精炼，用中文；先给结论，再给依据（文件:行号）
 - 不使用 emoji（平台审美：纯文字/几何符号）`;
 
@@ -334,41 +414,53 @@ export async function runBotTask(opts: {
   mode?: Mode;
   signal?: AbortSignal;
   onEvent: (e: BotEvent) => void;
-  maxTurns?: number;
 }): Promise<void> {
-  const { cfg, cwd, events, signal, onEvent, maxTurns = 8, mode = "readonly" } = opts;
+  const { cfg, cwd, events, signal, onEvent, mode = "readonly" } = opts;
   // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
   const mem = memoryBlock();
-  const system = SYSTEM(cwd, "阅读者", mode) + (mem ? `\n\n${mem}` : "");
+  const system = SYSTEM(cwd, mode === "full" ? "写作者" : "阅读者", mode) + (mem ? `\n\n${mem}` : "");
+  const tools = TOOLS_FOR(mode);
   const win = contextWindow(cfg.model);
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));
   const summarizeAt = Number(process.env.KRYSTAL_CONTEXT_SUMMARIZE_AT ?? Math.round(win * 0.85));
   const keepRecent = 6;
   let summary = latestNote(events);
-  let asm = assembleContext({ system, events, summary, foldAt, summarizeAt, keepRecent });
-  if (asm.toSummarize?.length) {
-    onEvent({ type: "context", stage: "summarizing" });
-    const text = await summarize(cfg, asm.toSummarize, signal);
-    if (text) {
-      summary = text;
-      onEvent({ type: "summary", text });
-      asm = assembleContext({ system, events, summary, foldAt, summarizeAt, keepRecent });
-    } else {
-      // 降级也要可见（绝不静默）：本轮不摘要，但仍做折叠
-      onEvent({ type: "context", stage: "summarize_failed" });
-      asm = assembleContext({ system, events, foldAt, summarizeAt, keepRecent, allowSummarize: false });
+  let summarizeFailed = false;
+  // 本任务运行期间新产生的事件（与视图落盘的形状一致）→ 回合中回收时与开场快照合并重装配
+  const fresh: SessionEvent[] = [];
+  // 回收装配：预装配与回合中共用同一套（折叠 → 摘要 → 稳定前缀 + 尾巴）
+  const compact = async (all: SessionEvent[]): Promise<unknown[]> => {
+    let asm = assembleContext({ system, events: all, summary, foldAt, summarizeAt, keepRecent, allowSummarize: !summarizeFailed });
+    if (asm.toSummarize?.length) {
+      onEvent({ type: "context", stage: "summarizing" });
+      const text = await summarize(cfg, asm.toSummarize, signal);
+      if (text) {
+        summary = text;
+        onEvent({ type: "summary", text });
+      } else {
+        // 降级也要可见（绝不静默）：不摘要，但仍做折叠
+        summarizeFailed = true;
+        onEvent({ type: "context", stage: "summarize_failed" });
+      }
+      asm = assembleContext({ system, events: all, summary, foldAt, summarizeAt, keepRecent, allowSummarize: false });
     }
-  }
-  if (asm.folded) onEvent({ type: "context", stage: "folding", folded: asm.folded });
-  const messages: unknown[] = withSystem(system, asm);
+    if (asm.folded) onEvent({ type: "context", stage: "folding", folded: asm.folded });
+    return withSystem(system, asm);
+  };
+  let messages = await compact(events);
   try {
-    for (let turn = 0; turn < maxTurns; turn++) {
+    // 循环无轮数上限（与 pi 同构：靠 final/esc/错误退出）；长任务靠回合中回收续航，不靠计数器截停
+    while (true) {
+      // ── 回合中回收（M1 同款）：逼近窗口 → 折叠/摘要后重装配
+      if (estimateTokens(messages) > foldAt) {
+        messages = await compact([...events, ...fresh]);
+      }
       // ── 重试：可重试错误等 10 秒再来，最多 3 次尝试
       let content = "";
       let toolCalls: Awaited<ReturnType<typeof streamChat>>["toolCalls"] = [];
       for (let attempt = 1; ; attempt++) {
         try {
-          const r = await streamChat(cfg, messages, READER_TOOLS, {
+          const r = await streamChat(cfg, messages, tools, {
             signal,
             onThinking: (d) => onEvent({ type: "thinking", delta: d }),
             onText: (d) => onEvent({ type: "text", delta: d }),
@@ -402,15 +494,17 @@ export async function runBotTask(opts: {
         return;
       }
       onEvent({ type: "assistant", content, toolCalls: toolCalls.map((t) => ({ id: t.id, name: t.name, args: t.args })) });
+      fresh.push({ t: "msg", at: new Date().toISOString(), role: "assistant", content, toolCalls: toolCalls.map((t) => ({ id: t.id, name: t.name, args: t.args })) });
       messages.push({ role: "assistant", content: content || null, tool_calls: toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: t.args } })) });
       for (const t of toolCalls) {
         onEvent({ type: "tool_start", id: t.id, name: t.name, args: t.args });
         const r = await executeTool(t.name, t.args, cwd, mode);
         onEvent({ type: "tool_result", id: t.id, name: t.name, ok: r.ok, denied: !!r.denied, output: r.output });
-        messages.push({ role: "tool", tool_call_id: t.id, content: (r.denied ? "[策略闸门拒绝] " : "") + r.output });
+        const toolContent = (r.denied ? "[策略闸门拒绝] " : "") + r.output;
+        fresh.push({ t: "msg", at: new Date().toISOString(), role: "tool", content: toolContent, toolCallId: t.id });
+        messages.push({ role: "tool", tool_call_id: t.id, content: toolContent });
       }
     }
-    onEvent({ type: "error", message: `超过最大轮数（${maxTurns}）` });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     onEvent({ type: "error", message: /abort/i.test(msg) ? "已中断" : msg });

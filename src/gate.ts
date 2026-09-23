@@ -1,7 +1,7 @@
 // Krystal — 终端闸门（三层策略）
 // 设计：docs/agent-spec.md §2.1（三层强制）＋ owner 的 /mode 需求：
 //   readonly：只有白名单通过（默认）
-//   full    ：白名单全通过 · 灰名单在「不误删」前提下放行 · 黑名单自动拦截
+//   full    ：白/灰名单直通 · 名单外的非破坏命令也放行（工作档要真能干活）· 黑名单自动拦截
 // 注意（诚实说明）：full 模式下终端 = 任意代码执行能力，黑名单是**防误操作的安全网**，
 //   不是安全沙箱。真正的强制层是 OS 沙箱 / 工作副本（§2.1 第三层，尚未实现）。
 import fs from "node:fs";
@@ -23,8 +23,11 @@ const WHITE_FIRST = new Set([
 ]);
 const GIT_WHITE = new Set(["status", "log", "diff", "show", "branch", "ls-files", "remote", "describe", "rev-parse"]);
 /** 灰名单：full 模式放行（写/建/改，但不删除）；readonly 拦截 */
-const GRAY_FIRST = new Set(["mkdir", "touch", "cp", "mv", "tee", "ln", "sed", "awk", "chmod", "npm", "npx", "pnpm", "yarn", "make", "pytest", "cargo", "go", "tsc", "eslint", "prettier", "python3", "node"]);
+const GRAY_FIRST = new Set(["mkdir", "touch", "cp", "mv", "tee", "ln", "sed", "awk", "chmod", "npm", "npx", "pnpm", "yarn", "make", "pytest", "cargo", "go", "tsc", "eslint", "prettier", "python3", "node", "pip", "pip3", "uv", "ruff", "black", "bun", "deno", "cmake", "gradle", "mvn", "dotnet", "tar", "unzip", "zip", "perl"]);
 const GIT_GRAY = new Set(["add", "commit", "stash", "switch", "checkout", "restore", "init", "tag", "merge", "rebase", "revert", "cherry-pick"]);
+/** gh 的只读子命令（第 2、3 段都须落在只读词表内） */
+const GH_GROUPS = new Set(["pr", "issue", "repo", "run", "release", "label", "gist", "workflow"]);
+const GH_READ_VERBS = new Set(["view", "list", "status", "checks", "search", "diff"]);
 
 /** 黑名单：**两种模式都拦**（不可逆 / 越权 / 系统级） */
 const BLACK: { re: RegExp; why: string }[] = [
@@ -94,7 +97,13 @@ export function decide(cmd: string, mode: Mode, cwd: string, exists: (p: string)
   // ③ 白名单（只读）
   if (!needsWrite(c)) {
     const f = first(c);
-    const ok = f === "git" ? GIT_WHITE.has(gitSub(c)) || gitSub(c) === "" : WHITE_FIRST.has(f);
+    const parts = c.split(/\s+/);
+    const ok =
+      f === "git"
+        ? GIT_WHITE.has(gitSub(c)) || gitSub(c) === ""
+        : f === "gh"
+          ? (parts[1] === "auth" && parts[2] === "status") || (GH_GROUPS.has(parts[1] ?? "") && GH_READ_VERBS.has(parts[2] ?? ""))
+          : WHITE_FIRST.has(f);
     if (ok) {
       // 白名单里的组合命令（如 `grep x | head`）在 full 下放行，只读模式下仍拦（避免误用重定向/管道改文件）
       if (shellMeta(c) && mode === "readonly") return { allow: false, list: "gray", reason: "只读模式：不接受管道/重定向（/mode full 可放行）" };
@@ -112,8 +121,8 @@ export function decide(cmd: string, mode: Mode, cwd: string, exists: (p: string)
       if (exists(abs)) return { allow: false, list: "black", reason: `拒绝截断已存在文件（${r.path}）：用 >> 追加，或先确认` };
     }
   }
-  if (needsWrite(c)) return { allow: true, list: "gray" };
-  return { allow: false, list: "black", reason: `不在白/灰名单内：${first(c)}` };
+  // 名单外：full 模式放行（黑名单/围栏已是硬边界；full 档本就是任意执行能力 + 防误删安全网）
+  return { allow: true, list: "gray" };
 }
 
 export const modeLabel = (m: Mode) => (m === "full" ? "完全访问" : "只读");
