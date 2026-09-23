@@ -302,81 +302,107 @@ export async function streamChat(
   tools: BotTool[],
   h: StreamHandlers = {},
 ): Promise<{ content: string; toolCalls: ToolCall[] }> {
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages,
-      tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })),
-      stream: true,
-      stream_options: { include_usage: true }, // 真实 usage + cached_tokens（§13.5 度量）
-    }),
-    signal: h.signal ?? AbortSignal.timeout(180_000),
-  });
-  if (!res.ok) throw new Error(`平台模型 HTTP ${res.status}：${(await res.text().catch(() => "")).slice(0, 160)}`);
-  if (!res.body) throw new Error("平台模型无响应体");
+  // 空闲看门狗：流上超过 idleMs 没有任何数据 → abort（转成可重试错误）；用户 esc 信号原样穿透。
+  // 旧写法 `h.signal ?? timeout(180s)` —— 传了 signal 超时就永远不生效，流一旦挂起整个任务冻住（2026-09-23 教训）。
+  const idleMs = Number(process.env.KRYSTAL_STREAM_IDLE_MS ?? 120_000);
+  const ctrl = new AbortController();
+  let idleFired = false;
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  const kick = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
+      idleFired = true;
+      ctrl.abort();
+    }, idleMs);
+  };
+  const onUserAbort = () => ctrl.abort();
+  h.signal?.addEventListener("abort", onUserAbort, { once: true });
+  kick();
+  try {
+    const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages,
+        tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })),
+        stream: true,
+        stream_options: { include_usage: true }, // 真实 usage + cached_tokens（§13.5 度量）
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`平台模型 HTTP ${res.status}：${(await res.text().catch(() => "")).slice(0, 160)}`);
+    if (!res.body) throw new Error("平台模型无响应体");
 
-  let content = "";
-  const acc = new Map<number, ToolCall>();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for await (const chunk of res.body) {
-    buf += decoder.decode(chunk as Uint8Array, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop() ?? "";
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const payload = t.slice(5).trim();
-      if (payload === "[DONE]") continue;
-      let delta: { content?: string; reasoning_content?: string; tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[] };
-      try {
-        const json = JSON.parse(payload) as {
-          choices?: { delta?: typeof delta }[];
-          usage?: {
-            prompt_tokens?: number;
-            completion_tokens?: number;
-            prompt_tokens_details?: { cached_tokens?: number };
-            prompt_cache_hit_tokens?: number; // DeepSeek
-            cached_tokens?: number; // 部分兼容端点
-            cache_read_input_tokens?: number; // Anthropic 风格
+    let content = "";
+    const acc = new Map<number, ToolCall>();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for await (const chunk of res.body) {
+      kick(); // 收到数据 → 重置空闲看门狗
+      buf += decoder.decode(chunk as Uint8Array, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const payload = t.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        let delta: { content?: string; reasoning_content?: string; tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[] };
+        try {
+          const json = JSON.parse(payload) as {
+            choices?: { delta?: typeof delta }[];
+            usage?: {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+              prompt_tokens_details?: { cached_tokens?: number };
+              prompt_cache_hit_tokens?: number; // DeepSeek
+              cached_tokens?: number; // 部分兼容端点
+              cache_read_input_tokens?: number; // Anthropic 风格
+            };
           };
-        };
-        if (json.usage) {
-          h.onUsage?.({
-            prompt: json.usage.prompt_tokens ?? 0,
-            // 跨厂商兼容：取第一个存在的缓存命中字段（都不报 → 0，界面显示「—」，靠本地前缀稳定性判据）
-            cached:
-              json.usage.prompt_tokens_details?.cached_tokens ??
-              json.usage.prompt_cache_hit_tokens ??
-              json.usage.cached_tokens ??
-              json.usage.cache_read_input_tokens ??
-              0,
-            completion: json.usage.completion_tokens ?? 0,
-          });
+          if (json.usage) {
+            h.onUsage?.({
+              prompt: json.usage.prompt_tokens ?? 0,
+              // 跨厂商兼容：取第一个存在的缓存命中字段（都不报 → 0，界面显示「—」，靠本地前缀稳定性判据）
+              cached:
+                json.usage.prompt_tokens_details?.cached_tokens ??
+                json.usage.prompt_cache_hit_tokens ??
+                json.usage.cached_tokens ??
+                json.usage.cache_read_input_tokens ??
+                0,
+              completion: json.usage.completion_tokens ?? 0,
+            });
+          }
+          delta = json.choices?.[0]?.delta ?? {};
+        } catch {
+          continue;
         }
-        delta = json.choices?.[0]?.delta ?? {};
-      } catch {
-        continue;
-      }
-      if (delta.reasoning_content) h.onThinking?.(delta.reasoning_content);
-      if (delta.content) {
-        content += delta.content;
-        h.onText?.(delta.content);
-      }
-      for (const tc of delta.tool_calls ?? []) {
-        const cur = acc.get(tc.index) ?? { id: "", name: "", args: "" };
-        if (tc.id) cur.id = tc.id;
-        if (tc.function?.name) cur.name += tc.function.name;
-        if (tc.function?.arguments) cur.args += tc.function.arguments;
-        acc.set(tc.index, cur);
-        if (cur.name) h.onToolArgs?.(cur.name, cur.args);
+        if (delta.reasoning_content) h.onThinking?.(delta.reasoning_content);
+        if (delta.content) {
+          content += delta.content;
+          h.onText?.(delta.content);
+        }
+        for (const tc of delta.tool_calls ?? []) {
+          const cur = acc.get(tc.index) ?? { id: "", name: "", args: "" };
+          if (tc.id) cur.id = tc.id;
+          if (tc.function?.name) cur.name += tc.function.name;
+          if (tc.function?.arguments) cur.args += tc.function.arguments;
+          acc.set(tc.index, cur);
+          if (cur.name) h.onToolArgs?.(cur.name, cur.args);
+        }
       }
     }
+    // 工具调用顺序 = Map 插入序（流里的 index 顺序）；此前按 Number(id) 排序是错的（id 非数字 → NaN）
+    return { content, toolCalls: [...acc.values()] };
+  } catch (e) {
+    if (h.signal?.aborted) throw e; // 用户中断：上层判「已中断」（不重试）
+    if (idleFired) throw new Error(`流式空闲超时（${Math.round(idleMs / 1000)}s 无数据）`); // 可重试（isRetryable 命中「超时」）
+    throw e;
+  } finally {
+    clearTimeout(idle);
+    h.signal?.removeEventListener("abort", onUserAbort);
   }
-  // 工具调用顺序 = Map 插入序（流里的 index 顺序）；此前按 Number(id) 排序是错的（id 非数字 → NaN）
-  return { content, toolCalls: [...acc.values()] };
 }
 
 // ---------- Bot 循环（等输入 → 模型 → 工具 → 回填 → 直到 final） ----------

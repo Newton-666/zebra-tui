@@ -1,4 +1,3 @@
-// KRYSTAL-WRITE-TEST-MARKER-9f3a
 // Krystal Bot — 原型 TUI：cell 即它的 TUI（§9.4）
 // 布局与 app.ts 同构：VStack[header, ScrollView(grow), status, 输入框（两条线，浅蓝）]
 // 流式渲染：thinking（dim 流动行）/ 工具调用（▸ 工具 参数 → 结果行）/ 回答
@@ -26,6 +25,7 @@ import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
   contextStatus,
+  countEvents,
   createBotSession,
   lastUsage,
   loadBotMeta,
@@ -456,7 +456,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     const items = sessions.map((m) => ({
       value: m.id,
       label: m.name ? `${m.name}  (${m.createdAt.slice(5, 16).replace("T", " ")})` : `${m.createdAt.slice(0, 16).replace("T", " ")} · ${m.id.replace(/^bot-/, "").slice(0, 15)}`,
-      description: `${m.model} · ${m.events ?? 0}`,
+      description: `${m.model} · ${countEvents(m.id)} 条消息`,
     }));
     const picker = new ListOverlay({
       title: "回溯历史",

@@ -35,3 +35,6 @@
 - 助手改动前后：先确认「要动的是测试数据还是用户数据」。
 - 测试会话隔离：`KRISTAL_SESSIONS_DIR` 指向临时目录（`npm run smoke` 已默认这样），
   任何脚本/测试都不得写真实 `sessions/`。
+- **流式必须常备空闲看门狗**（2026-09-23：`signal ?? timeout(180s)` 的写法在传了 signal 后
+  超时永不生效，SSE 挂起一次整个任务冻住且无错误无重试）。现 `streamChat` 用空闲看门狗
+  （`KRYSTAL_STREAM_IDLE_MS`，默认 120s），空闲超时转可重试错误；esc 中断与超时分开判定。

@@ -71,6 +71,25 @@ export function loadEvents(id: string): SessionEvent[] {
   }
 }
 
+/** 统计事件数（只数 msg）——历史列表用，让「里面有多少对话」一眼可见 */
+export function countEvents(id: string): number {
+  try {
+    return fs
+      .readFileSync(eventsFile(id), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .filter((l) => {
+        try {
+          return (JSON.parse(l) as SessionEvent).t === "msg";
+        } catch {
+          return false;
+        }
+      }).length;
+  } catch {
+    return 0;
+  }
+}
+
 export function loadBotMeta(id: string): BotMeta | undefined {
   try {
     return JSON.parse(fs.readFileSync(metaFile(id), "utf8")) as BotMeta;
