@@ -86,14 +86,17 @@ class UserBlock implements Component {
 
 /** 工具调用块：与 pi 同源（tool-execution.js）——Box(padX=1, padY=1, toolXxxBg)
  *  状态色整页宽背景 + 加粗工具名 + dim 输出 + 截断提示；块内只用 bold/dim（\x1b[22m 还原）以免清掉底色 */
-// Krystal 色系（取自品牌渐变 51→45→39→33→27→26 与平台常量）：
-//   执行中 = 平台深蓝 BG_BLUE(48;5;24)｜成功 = 青蓝 48;5;30｜被闸门拦下 = 近黑深蓝 48;5;17
-const TOOL_BG: Record<string, string> = { pending: BG_BLUE, ok: "48;5;30", denied: "48;5;17", error: "48;5;17" };
-const TOOL_MARK: Record<string, string> = { pending: "38;5;45", ok: "38;5;51", denied: "38;5;231", error: "38;5;231" };
+// 莫兰迪色系：低饱和灰调（三者明度相近，块感统一，不刺眼）
+//   执行中 = 灰蓝(48;5;60)｜成功 = 灰绿(48;5;65)｜被闸门拦下 = 灰玫(48;5;95)
+const TOOL_BG: Record<string, string> = { pending: "48;5;60", ok: "48;5;65", denied: "48;5;95", error: "48;5;95" };
+const TOOL_MARK: Record<string, string> = { pending: "38;5;223", ok: "38;5;231", denied: "38;5;231", error: "38;5;231" };
+// 块内文字用实色（dim 在彩底上会发灰）：标题加粗白、参数浅青白、输出浅灰、提示中灰
+const T_TITLE = "\x1b[38;5;231m";
+const T_ARGS = "\x1b[38;5;195m";
+const T_OUT = "\x1b[38;5;252m";
+const T_HINT = "\x1b[38;5;246m";
 const B_ON = "\x1b[1m";
 const B_OFF = "\x1b[22m";
-const D_ON = "\x1b[2m";
-const D_OFF = "\x1b[22m";
 class ToolBlock implements Component {
   name: string;
   args: string;
@@ -123,11 +126,11 @@ class ToolBlock implements Component {
       return chip(" " + body + " ".repeat(padTo) + ZWSP, TOOL_BG[this.state]!, FG_WHITE);
     };
     const mark = this.state === "pending" ? "●" : this.state === "ok" ? "✓" : "✗ 闸门拒绝";
-    const markColored = `\x1b[${TOOL_MARK[this.state]!}m${mark}\x1b[39m`;
-    const head = `${markColored} ${B_ON}${this.name}${B_OFF} ${D_ON}${this.args}${D_OFF}`;
+    const markColored = `\x1b[${TOOL_MARK[this.state]!}m${mark}`;
+    const head = `${markColored} ${T_TITLE}${B_ON}${this.name}${B_OFF} ${T_ARGS}${this.args}`;
     const rows = [bar(), bar(head)];
-    for (const l of this.output) rows.push(bar(D_ON + "  " + l + D_OFF));
-    if (this.note) rows.push(bar(D_ON + "  " + this.note + D_OFF));
+    for (const l of this.output) rows.push(bar(T_OUT + "  " + l));
+    if (this.note) rows.push(bar(T_HINT + "  " + this.note));
     rows.push(bar());
     return rows;
   }
