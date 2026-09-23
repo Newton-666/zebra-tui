@@ -148,3 +148,12 @@ const WINDOWS: [RegExp, number][] = [
   [/gemini/, 1_000_000],
 ];
 export const contextWindow = (model: string): number => WINDOWS.find(([re]) => re.test(model))?.[1] ?? 128_000;
+
+export interface ContextStatus { pct: number; level: "ok" | "fold" | "summarize"; label: string }
+/** 窗口占用与阈值级别（折叠线 70% / 摘要线 85%，与 context.ts 的触发阈值一致） */
+export function contextStatus(promptTokens: number, model: string, foldRatio = 0.7, summarizeRatio = 0.85): ContextStatus {
+  const pct = Math.max(0, Math.round((promptTokens / contextWindow(model)) * 100));
+  const level: ContextStatus["level"] = promptTokens >= contextWindow(model) * summarizeRatio ? "summarize" : promptTokens >= contextWindow(model) * foldRatio ? "fold" : "ok";
+  const label = `上下文 ${pct}%${level === "fold" ? "（折叠线）" : level === "summarize" ? "（摘要线）" : ""}`;
+  return { pct, level, label };
+}

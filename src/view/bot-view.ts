@@ -24,7 +24,7 @@ import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts"
 import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
-  contextWindow,
+  contextStatus,
   createBotSession,
   lastUsage,
   loadBotMeta,
@@ -340,16 +340,17 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   };
   const statusComp: Component = {
     render(w: number): string[] {
-      const win = contextWindow(cfg?.model ?? "");
-      const ctx = usage ? Math.round((usage.prompt / win) * 100) : Math.round((tokens / win) * 100);
+      const cs = contextStatus(usage ? usage.prompt : tokens, cfg?.model ?? "");
+      const ctx = cs.pct;
       // provider 普遍不报（GLM 实测恒为 0）→ 报 0 时显示「—」而不是误导性的 0%
       const cache = usage && usage.cached > 0 ? `${Math.round((usage.cached / usage.prompt) * 100)}%` : "—";
       const tok = usage ? `${usage.prompt} tok` : `~${tokens.toFixed(0)} tok`;
       const pfx = prefixStable === undefined ? "前缀 —" : prefixStable ? "前缀 稳定" : "前缀 变化";
       const sid = sessionId.replace(/^bot-/, "").slice(0, 15);
       const extra = `${foldCount ? `折叠 ${foldCount} · ` : ""}${summaryActive ? "摘要 有 · " : ""}`;
-      const seg = `${sid} · ${busy ? state : "空闲"} · 上下文 ~${ctx}% · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
-      return [truncateToWidth(` ${dim(`${seg} · esc 中断 · ctrl+c 退出`)}`, w)];
+      const ctxText = cs.level === "ok" ? dim(cs.label) : cs.level === "fold" ? fg(BLUE_LIGHT, cs.label) : bold(fg(BLUE_LIGHT, `${cs.label} ▲`));
+      const seg = `${sid} · ${busy ? state : "空闲"} · ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
+      return [truncateToWidth(` ${seg} ${dim("· esc 中断 · ctrl+c 退出")}`, w)];
     },
     invalidate(): void {},
   };

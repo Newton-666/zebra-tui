@@ -91,6 +91,19 @@ const g = M.renderGraph();
 assert.ok(g.lines[0]!.includes("记忆图") && g.lines.some((l) => l.includes("实体关联")), "图含统计与关联边");
 console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.edges} 关联`);
 
+// ── 上下文占用与阈值预警（折叠线 70% / 摘要线 85%）
+{
+  const { contextStatus, contextWindow } = await import("../src/session.ts");
+  assert.equal(contextWindow("glm-4.6"), 200_000);
+  const win = contextWindow("glm-4.6");
+  assert.equal(contextStatus(Math.round(win * 0.1), "glm-4.6").level, "ok");
+  assert.equal(contextStatus(Math.round(win * 0.72), "glm-4.6").level, "fold");
+  assert.equal(contextStatus(Math.round(win * 0.9), "glm-4.6").level, "summarize");
+  assert.ok(contextStatus(Math.round(win * 0.72), "glm-4.6").label.includes("折叠线"));
+  assert.ok(contextStatus(Math.round(win * 0.9), "glm-4.6").label.includes("摘要线"));
+  console.log("10) 上下文占用与阈值预警 ✓ ok/折叠线/摘要线");
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log("\nALL MEMORY TESTS PASS");
 // ── 团队线接入记忆图：断言带 by+scope+evidence；conflicts(scope) 抓矛盾；团队/Bot 互不污染
