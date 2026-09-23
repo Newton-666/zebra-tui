@@ -1,3 +1,4 @@
+// KRYSTAL-WRITE-TEST-MARKER-9f3a
 // Krystal Bot — 原型 TUI：cell 即它的 TUI（§9.4）
 // 布局与 app.ts 同构：VStack[header, ScrollView(grow), status, 输入框（两条线，浅蓝）]
 // 流式渲染：thinking（dim 流动行）/ 工具调用（▸ 工具 参数 → 结果行）/ 回答
@@ -419,12 +420,27 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   // ── 弹层选择器（照 bobo activeSessionSwitcher 的架构：真弹层 + 状态驱动 + d 两次删除）
   // 不再往 transcript 里 push 组件（那是「一堆」的根源）
   let overlayHandle: { hide: () => void } | undefined;
+  let currentDeleted = false; // 删掉了当前会话 → 关闭弹层时新建一个
   let overlayKeys: ((d: string) => void) | undefined;
 
   const closeOverlay = (): void => {
     overlayKeys = undefined;
     overlayHandle?.hide();
     overlayHandle = undefined;
+    if (currentDeleted) {
+      // 删的是当前会话：这里才新建，避免删除瞬间列表里冒出一条
+      currentDeleted = false;
+      sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "阅读者", mode }).id;
+      setSessionMode(sessionId, mode);
+      transcript.items = [...pushIntro(cfg?.model ?? "", cwd), ""];
+      usage = undefined;
+      prevHistory = undefined;
+      prefixStable = undefined;
+      foldCount = 0;
+      summaryActive = false;
+      push(dim("  当前会话已删除——已为你新开一个会话（继承模式）"), "");
+      refresh();
+    }
   };
 
   const openOverlay = (picker: Component & { handleInput(d: string): void }, width = 92): void => {
