@@ -83,9 +83,12 @@ export class Transcript implements Component {
   // 每项按（对象身份 + 版本号 + 宽度）缓存裁剪后的行：滚动/流式增量时全是缓存命中，不再每帧重排全量文本。
   // 可变组件（StreamText.append / ToolBlock）在内容变化时自增 rev → 只有那一项重算。
   private cache = new Map<object | string, { rev: number | string; w: number; lines: string[] }>();
-  private static revOf(it: string | Component): number | string {
+  private static revOf(it: string | Component): number | string | symbol {
     if (typeof it === "string") return it;
-    return (it as { rev?: number }).rev ?? 0;
+    const v = it as { rev?: number; volatile?: boolean };
+    // volatile 组件（闪烁/扫光等逐帧变化的活行）：每次返回唯一键 → 永不命中缓存
+    if (v.volatile) return Symbol("volatile");
+    return v.rev ?? 0;
   }
   render(w: number): string[] {
     this.lastWidth = w;
@@ -163,6 +166,10 @@ export class ToolBlock implements Component {
 
   get args(): string {
     return this.summary;
+  }
+  /** pending 态逐帧重渲（圆点闪烁）；完成后恢复缓存 */
+  get volatile(): boolean {
+    return this.state === "pending";
   }
   /** 传入原始 args JSON：重新提取摘要（修正流式半截 JSON）+ 重算 diff 源数据 */
   set args(raw: string) {
@@ -1097,6 +1104,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         // 活行：与工具调用同型 —— 圆点闪烁 + sleeping 扫光，完成后原地换成蓝点 + diff + 新记忆图
         sleeping = true;
         const live: Component = {
+          volatile: true, // 活行：圆点闪烁 + 扫光逐帧变化，不做逐项缓存
           render(wid: number): string[] {
             const dot = Math.floor(workingTick / 4) % 2 === 0 ? fg("38;5;117", "●") : dim("○");
             return [truncateToWidth(`  ${dim("╰─")} ${dot} ${sweep("sleeping", workingTick)}`, wid, "")];
