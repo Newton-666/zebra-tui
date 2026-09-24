@@ -106,9 +106,10 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `${m.name}（krystal）缺平台模型配置——先 /login 或首页配置，再重建团队` });
       continue;
     }
+    const cfg = { ...base, model };
     const km = new KrystalMember({
       member: m,
-      config: { ...base, model },
+      config: cfg,
       cwd: config.cwd,
       identity: identityText(config, m.id) + "\n\n" + briefText(config, m.id),
       sessionId: config.memberSessions?.[m.id],
