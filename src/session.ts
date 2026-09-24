@@ -138,6 +138,20 @@ export function setSessionMode(id: string, mode: "readonly" | "full"): BotMeta |
   return m;
 }
 
+/** /model：设置本会话的模型（bot.json 的 model 字段；/resume 列表与续聊继承它） */
+export function setSessionModel(id: string, model: string): BotMeta | undefined {
+  const m = loadBotMeta(id);
+  if (!m) return undefined;
+  m.model = model;
+  m.updatedAt = new Date().toISOString();
+  try {
+    fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);
+  } catch {
+    return undefined;
+  }
+  return m;
+}
+
 /** 删除会话：**移入 sessions/.trash/<id>-<ts>**（可手动恢复），不做不可逆删除 */
 export function trashSession(id: string): { ok: boolean; where?: string; error?: string } {
   if (!id || id.includes("/") || id.includes("..")) return { ok: false, error: "非法的会话 id" };
@@ -207,7 +221,10 @@ export function messagesFrom(events: SessionEvent[]): { role: string; content?: 
 
 /** 模型上下文窗口（内置常见表；不猜不探测，未知按 128k） */
 const WINDOWS: [RegExp, number][] = [
-  [/^glm-4\.[567]|^glm-5/, 200_000],
+  [/^glm-4\.[567]/, 200_000],
+  // glm-5.3-flash 实测 ≥958k prompt 成功（2026-09-24 向端点探测；旧表写 200k 导致百分比虚高、
+  // 折叠/摘要阈值提前触发 —— 即「上下文用得快」的主因）
+  [/^glm-5/, 1_000_000],
   [/^glm-4(-flash|-air|-long)?$/, 128_000],
   [/deepseek/, 128_000],
   [/qwen|qwq/, 131_072],

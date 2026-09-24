@@ -70,6 +70,31 @@ export function clearBuilder(): void {
   }
 }
 
+// ---------- Krystal Bot 自己的模型（与平台搭建模型分离，凭据共用） ----------
+
+/** Bot 模型：config.json 的 .bot.model；未单独设过 → 调用方回落 builder.model（「平台设好了这边自动有」） */
+export function loadBotModel(): string | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as { bot?: { model?: string } };
+    return raw.bot?.model?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** /model 设置 Bot 默认模型：只写 .bot.model，**不动 builder.model**（平台用什么与 Bot 无关） */
+export function setBotModel(model: string): void {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Record<string, unknown>;
+  } catch {
+    /* 首次保存 */
+  }
+  raw.bot = { ...((raw.bot as Record<string, unknown> | undefined) ?? {}), model: model.trim() };
+  fs.writeFileSync(CONFIG_FILE, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+}
+
 /** 打码显示：sk-abcd…ef12 */
 export function maskKey(k: string): string {
   return k.length > 10 ? `${k.slice(0, 7)}…${k.slice(-4)}` : "•".repeat(k.length);

@@ -3,6 +3,7 @@
 // 流式渲染：thinking（dim 流动行）/ 工具调用（▸ 工具 参数 → 结果行）/ 回答
 import {
   Editor,
+  Input,
   Markdown,
   SelectList,
   ProcessTerminal,
@@ -19,7 +20,7 @@ import {
 } from "../../deps/pi-tui/dist/index.js";
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
-import { loadBuilder, type BuilderConfig } from "../builder.ts";
+import { fetchModels, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig } from "../builder.ts";
 import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
@@ -35,6 +36,7 @@ import {
   messagesFrom,
   renameSession,
   setSessionMode,
+  setSessionModel,
   touchSession,
   trashSession,
 } from "../session.ts";
@@ -336,7 +338,10 @@ export class ListOverlay implements Component {
 }
 
 export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> {
-  const cfg: BuilderConfig | undefined = loadBuilder();
+  // Krystal Bot 的模型与平台搭建模型分离（spec §1）：bot 单独设过 → 用 bot 的；否则继承平台（「平台设好了这边自动有」）
+  let cfg: BuilderConfig | undefined = loadBuilder();
+  const botDefaultModel = loadBotModel();
+  if (cfg && botDefaultModel) cfg = { ...cfg, model: botDefaultModel };
   const terminal = new ProcessTerminal();
   const tui = new TuiAltScreen(terminal, false, undefined, { wheelScrollLines: 3 });
 
@@ -369,6 +374,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let pickerBlock: PickerBlock | undefined;
   let pickerKind: "sessions" | "mode" | undefined;
   let mode: Mode = resumed?.mode ?? loadBotMeta(sessionId)?.mode ?? "readonly";
+  // 会话自己的模型优先（/model 设置过的存 bot.json；续聊时延续那个会话当时用的脑）
+  if (resumed?.model && cfg) cfg = { ...cfg, model: resumed.model };
   let deleteArmed: string | undefined; // 两次 d 删除：第一次只武装并提示
   let pickerSel: string | undefined; // 当前选中的会话 id（重开列表时恢复位置）
   let foldCount = 0; // 本回合折叠的工具输出条数（上下文回收的可见性）
@@ -392,7 +399,14 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let tokens = 0;
   const abort = new AbortController();
 
-  const modelLine = cfg ? `${cfg.model}` : "未配置平台模型——回首页 Platform model 配置";
+  let modelLine = cfg ? `${cfg.model}` : "未配置 API——对话内 /login 配置（与平台共用）";
+  const applyModelChange = (model: string, note: string): void => {
+    if (!cfg) return;
+    cfg = { ...cfg, model };
+    modelLine = cfg.model;
+    push(dim(note), "");
+    refresh();
+  };
   /** 开场面板（logo + 画像 + 信息卡）：新会话与续聊都渲染 */
   const pushIntro = (model: string, sessionCwd: string) =>
     renderPortrait(tui.terminal?.columns ?? 80, tui.terminal?.rows ?? 24, {
@@ -525,6 +539,174 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     openOverlay(picker);
   };
 
+  // ── /model 与 /login（参考 pi：模型切换与凭据配置都是对话内的轻流程）
+  /** 通用输入弹层：标题 + 单行输入（enter 提交 · esc 取消） */
+  const openInputOverlay = (title: string, prefill: string, onSubmit: (v: string) => void): void => {
+    const input = new Input();
+    if (prefill) input.setValue(prefill);
+    input.onSubmit = (v: string) => {
+      const val = (v ?? input.getValue()).trim();
+      if (!val) return;
+      closeOverlay();
+      onSubmit(val);
+    };
+    input.onEscape = () => closeOverlay();
+    const panel: Component = {
+      render: (w: number) => [bold(` ${title}`), "", ...input.render(Math.max(24, w - 4))],
+      handleInput: (d: string) => input.handleInput(d),
+      invalidate: () => input.invalidate(),
+    };
+    openOverlay(panel, 64);
+  };
+
+  /** /model：切 Krystal Bot 自己的模型（动态拉取；与平台搭建模型分离，只写 config.json 的 bot.model） */
+  const openModelPicker = (): void => {
+    if (!cfg) {
+      push(dim("  未配置 API——先用 /login 配置（与平台共用凭据）"), "");
+      refresh();
+      return;
+    }
+    push(dim(`  正在拉取模型列表（${cfg.baseUrl}）…`), "");
+    refresh();
+    void fetchModels({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey })
+      .then((models) => {
+        const picker = new ListOverlay({
+          title: "Krystal Bot 模型（与平台搭建模型分离）",
+          hint: "↑↓ 选择 · enter 确认 · esc 取消",
+          items: [
+            ...models.map((m) => ({ value: m, label: m, description: m === cfg!.model ? "当前" : "" })),
+            { value: "__manual", label: "手动输入模型 id…", description: "列表里没有时使用" },
+          ],
+          onPick: (v) => {
+            closeOverlay();
+            if (v === "__manual") openInputOverlay("模型 id", "", applyBotModel);
+            else applyBotModel(v);
+          },
+          onCancel: closeOverlay,
+        });
+        openOverlay(picker, 78);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        push(fg("31", ` ✗ 拉取失败：${msg}——改用手动输入模型 id`), "");
+        refresh();
+        openInputOverlay("模型 id（手动输入）", "", applyBotModel);
+      });
+  };
+  const applyBotModel = (model: string): void => {
+    if (!cfg) return;
+    setBotModel(model); // Bot 自己的默认模型（config.json 的 bot.model，平台搭建模型不动）
+    setSessionModel(sessionId, model); // 本会话即刻生效；/resume 列表同步
+    applyModelChange(model, `  Krystal Bot 模型已切换：${model}（平台搭建模型不受影响）`);
+  };
+
+  /** /login：配置 API（provider 预设 → Base URL → Key → 动态拉模型 → 测试 → 保存）。
+   *  凭据与平台共用（存同一份 config.json 的 builder 段）：平台设好了这边自动有，这边设了平台也有；
+   *  模型分离：保存后 Bot 用自己的 bot.model（若有），平台搭建模型不被覆盖。 */
+  const openLoginFlow = (): void => {
+    const draft: Partial<BuilderConfig> = loadBuilder() ?? {};
+    let providerLabel = "";
+    const showProvider = (): void => {
+      const picker = new ListOverlay({
+        title: "选择模型提供商（/login · 凭据与平台共用，模型分离）",
+        hint: "↑↓ 选择 · enter 确认 · esc 取消",
+        items: [
+          ...PROVIDER_PRESETS.map((p) => ({ value: p.id, label: p.label, description: p.baseUrl })),
+          { value: "__custom", label: "自定义 Base URL…", description: "任何 OpenAI 兼容端点" },
+        ],
+        onPick: (v) => {
+          closeOverlay();
+          const preset = PROVIDER_PRESETS.find((p) => p.id === v);
+          if (preset) {
+            providerLabel = preset.label;
+            draft.baseUrl = preset.baseUrl;
+            showKey();
+          } else showUrl();
+        },
+        onCancel: closeOverlay,
+      });
+      openOverlay(picker, 86);
+    };
+    const showUrl = (): void =>
+      openInputOverlay("Base URL（OpenAI 兼容根地址，含 /v1）", draft.baseUrl ?? "", (v) => {
+        providerLabel = "自定义";
+        draft.baseUrl = v;
+        showKey();
+      });
+    const showKey = (): void =>
+      openInputOverlay(`API Key · ${providerLabel}（本地服务如 Ollama 可留空回车）`, draft.apiKey ?? "", (v) => {
+        draft.apiKey = v || "none"; // 本地服务不需要真 key，留空占位
+        startFetch();
+      });
+    const startFetch = (): void => {
+      if (!draft.baseUrl || !draft.apiKey) return;
+      push(dim(`  正在拉取模型列表（${draft.baseUrl}）…`), "");
+      refresh();
+      void fetchModels({ baseUrl: draft.baseUrl, apiKey: draft.apiKey })
+        .then((models) => {
+          const picker = new ListOverlay({
+            title: `选择模型（${providerLabel}，动态拉取——测试通过后才保存）`,
+            hint: "↑↓ 选择 · enter 确认 · esc 取消",
+            items: [
+              ...models.map((m) => ({ value: m, label: m, description: "" })),
+              { value: "__manual", label: "手动输入模型 id…", description: "列表里没有时使用" },
+            ],
+            onPick: (v) => {
+              closeOverlay();
+              if (v === "__manual") openInputOverlay("模型 id", draft.model ?? "", (mv) => { draft.model = mv; testAndSave(); });
+              else {
+                draft.model = v;
+                testAndSave();
+              }
+            },
+            onCancel: closeOverlay,
+          });
+          openOverlay(picker, 86);
+        })
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          push(fg("31", ` ✗ 拉取失败：${msg}——改用手动输入模型 id`), "");
+          refresh();
+          openInputOverlay("模型 id（拉取失败，可手输）", draft.model ?? "", (mv) => {
+            draft.model = mv;
+            testAndSave();
+          });
+        });
+    };
+    const testAndSave = (): void => {
+      if (!draft.baseUrl || !draft.apiKey || !draft.model) return;
+      push(dim(`  测试连接中（${draft.model}）…`), "");
+      refresh();
+      void testBuilder(draft as BuilderConfig)
+        .then(() => {
+          saveBuilder(draft as BuilderConfig); // 平台与 Krystal Bot 共用同一份凭据
+          // 模型分离：Bot 有自己的默认模型 → 保持；没有 → 用这次登录选的（平台设好了这边自动有）
+          cfg = { baseUrl: draft.baseUrl!, apiKey: draft.apiKey!, model: loadBotModel() ?? draft.model! };
+          modelLine = cfg.model;
+          push(dim(`  已保存（凭据与平台共用）：${cfg.baseUrl} · ${maskKey(cfg.apiKey)} · Bot 模型 ${cfg.model}`), "");
+          refresh();
+        })
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          push(fg("31", ` ✗ 测试未通过（未保存）：${msg}`), "");
+          refresh();
+        });
+    };
+    if (cfg) {
+      const picker = new ListOverlay({
+        title: "Platform API（/login · 已配置）",
+        hint: "enter 确认 · esc 取消",
+        items: [{ value: "edit", label: "重新配置", description: `${cfg.baseUrl} · ${maskKey(cfg.apiKey)} · 平台模型 ${cfg.model}` }],
+        onPick: () => {
+          closeOverlay();
+          showProvider();
+        },
+        onCancel: closeOverlay,
+      });
+      openOverlay(picker, 86);
+    } else showProvider();
+  };
+
   const openModePicker = (): void => {
     const picker = new ListOverlay({
       title: "终端模式",
@@ -578,7 +760,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const sid = sessionName ? `${sessionName}` : sessionId.replace(/^bot-/, "").slice(0, 15);
       const extra = `${foldCount ? `折叠 ${foldCount} · ` : ""}${summaryActive ? "摘要 有 · " : ""}`;
       const ctxText = cs.level === "ok" ? dim(cs.label) : cs.level === "fold" ? fg(BLUE_LIGHT, cs.label) : bold(fg(BLUE_LIGHT, `${cs.label} ▲`));
-      const seg = `${sid} · ${busy ? state : "空闲"} · ${modeLabel(mode)} · ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯`;
+      const seg = `${sid} · ${busy ? state : "空闲"} · ${modeLabel(mode)} · ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯 · /model 模型 · /login API`;
       return [truncateToWidth(` ${seg} ${dim("· esc 中断 · ctrl+c 退出")}`, w)];
     },
     invalidate(): void {},
@@ -806,18 +988,24 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       else if (cmd === "mode") {
         openModePicker();
         return;
+      } else if (cmd === "model") {
+        openModelPicker();
+        return;
+      } else if (cmd === "login") {
+        openLoginFlow();
+        return;
             } else if (cmd === "memory" || cmd === "mem") {
         const g = renderGraph();
         push("", ...g.lines.map((l) => (l.startsWith("●") || l.startsWith("○") ? fg("36", l) : dim(l))), "");
         refresh();
       } else if (cmd === "help") {
         push(
-          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /mode 终端模式 · /memory 记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"),
+          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /mode 终端模式 · /model 模型 · /login 配置 API · /memory 记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"),
           "",
         );
         refresh();
       } else {
-        push(dim(`  未知命令 ${body}（可用 /resume · /name · /memory · /new · /help）`), "");
+        push(dim(`  未知命令 ${body}（可用 /resume · /name · /mode · /model · /login · /memory · /new · /help）`), "");
         refresh();
       }
       return;
