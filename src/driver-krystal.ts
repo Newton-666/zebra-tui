@@ -92,7 +92,7 @@ export class KrystalMember {
             if (!s) continue;
             try {
               const j = JSON.parse(s);
-              if (j && j.text) this.send(\`[from \${j.from ?? "?"}] \${j.text}\`);
+              if (j && j.text) this.send(`[from ${j.from ?? "?"}] ${j.text}`);
             } catch { /* 半行/坏行：下次不再重读，跳过 */ }
           }
         } catch { /* 收件箱尚不存在：常态 */ }
