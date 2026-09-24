@@ -222,9 +222,9 @@ export class ToolBlock implements Component {
         : this.state === "denied" || this.state === "error"
           ? fg(DOT_ROSE, "●")
           : fg(BLUE, "●");
-    const head = `  ${dot} ${bold(this.name)} ${dim(this.summary)}`;
+    const head = `  ${dim("╰─")} ${dot} ${bold(this.name)} ${dim(this.summary)}`;
     const body = this.detail.map((d) =>
-      "    " + (d.kind === "del" ? fg(DIFF_DEL, dim("− " + d.text)) : d.kind === "add" ? fg(DIFF_ADD, dim("+ " + d.text)) : dim("  " + d.text)),
+      "  " + dim("  │   ") + (d.kind === "del" ? fg(DIFF_DEL, dim("− " + d.text)) : d.kind === "add" ? fg(DIFF_ADD, dim("+ " + d.text)) : dim("  " + d.text)),
     );
     if (this.note) body.push("    " + dim(this.note));
     return [head, ...body].map((l) => truncateToWidth(l, w, ""));
@@ -426,6 +426,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   };
   let busy = false;
   let state = cfg ? "空闲" : "未配置";
+  let turnThinking = ""; // 本回合累积的思考原文（落盘 + /resume 重放）
   let tokens = 0;
   const abort = new AbortController();
 
@@ -464,6 +465,12 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     for (const e of evs) {
       if (e.t === "msg" && e.role === "user") transcript.items.push(new UserBlock(e.content), "");
       else if (e.t === "msg" && e.role === "assistant") {
+        if (e.thinking) {
+          // 思考重放：与直播时同观感（dim + 前缀），pi 式「历史思考可见」
+          const tb = new StreamText("· thinking ", (t) => dim(t));
+          tb.append(e.thinking);
+          transcript.items.push(tb, "");
+        }
         if (e.toolCalls?.length) {
           for (const tc of e.toolCalls) {
             const b = new ToolBlock(tc.name, tc.args);
@@ -897,6 +904,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         }
         tokens += e.delta.length / 4;
         streamTo(e.delta);
+        turnThinking += e.delta; // 思考原文累积（final/assistant 时落盘 → /resume 可重放）
         break;
       case "text":
         state = "回答中";
@@ -985,8 +993,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           at: new Date().toISOString(),
           role: "assistant",
           content: e.content,
+          thinking: turnThinking || undefined,
           toolCalls: e.toolCalls,
         });
+        turnThinking = ""; // 本段思考已归属这条 assistant 事件
         break;
       }
       case "usage": {
@@ -1013,7 +1023,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           push(new Markdown(e.text, 1, 0, BOT_THEME));
           push("");
         }
-        appendEvent(sessionId, { t: "msg", at: new Date().toISOString(), role: "assistant", content: e.text });
+        appendEvent(sessionId, { t: "msg", at: new Date().toISOString(), role: "assistant", content: e.text, thinking: turnThinking || undefined });
+        turnThinking = "";
         touchSession(sessionId);
         busy = false;
         break;
@@ -1032,6 +1043,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     if (!cfg) return;
     busy = true;
     state = "连接中";
+    turnThinking = ""; // 新回合从零累积思考
     // 每回合从事件流装配上下文：只追加、顺序稳定 → 前缀缓存友好（§13.2）
     const events = loadEvents(sessionId);
     checkPrefix(events.filter((e) => e.t === "msg"));

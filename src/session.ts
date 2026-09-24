@@ -20,7 +20,7 @@ export interface BotMeta {
 
 export type SessionEvent =
   | { t: "meta"; at: string; cwd: string; model: string; tier: string }
-  | { t: "msg"; at: string; role: "user" | "assistant" | "tool"; content: string; toolCalls?: { id: string; name: string; args: string }[]; toolCallId?: string }
+  | { t: "msg"; at: string; role: "user" | "assistant" | "tool"; content: string; thinking?: string; toolCalls?: { id: string; name: string; args: string }[]; toolCallId?: string }
   | { t: "usage"; at: string; prompt: number; cached: number; completion: number; model: string }
   | { t: "note"; at: string; text: string } // M1 摘要 / M2 记忆
   // 开场（logo + 画像 + 信息卡）也是历史的一部分：落盘 → 续聊时一并重建（与 hermes 的 intro 消息同思路）
