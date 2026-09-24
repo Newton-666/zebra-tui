@@ -21,7 +21,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
-import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts";
+import { activeFacts, globalFactCount, importMirror, loadFacts, renderGraph, sleepMemories } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
@@ -1082,6 +1082,19 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         summaryActive = false;
         push(dim("  新会话已开始"), "");
         refresh();
+      } else if (cmd === "sleep") {
+        if (!cfg) {
+          push(dim("  睡眠整理需要平台模型——先 /login 配置"), "");
+          refresh();
+          return;
+        }
+        push(dim(`  睡眠整理中…（全局活跃事实 ${globalFactCount()} 条；模型出策展方案，内核逐条执行 append-only 事件）`), "");
+        refresh();
+        void sleepMemories(cfg).then((r) => {
+          push(dim(r ? `  睡眠整理完成：${r.summary}\n  报告：${r.reportPath}` : "  睡眠整理跳过（库空/进行中）或失败——详见 ~/.krystal/"), "");
+          refresh();
+        });
+        return;
       } else if (cmd === "model") {
         openModelPicker();
         return;
@@ -1094,12 +1107,12 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
       } else if (cmd === "help") {
         push(
-          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /model 模型 · /login 配置 API · /memory 记忆图 · /new 新会话 · esc 中断 · ctrl+c 退出"),
+          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /model 模型 · /login 配置 API · /memory 记忆图 · /sleep 睡眠整理 · /new 新会话 · esc 中断 · ctrl+c 退出"),
           "",
         );
         refresh();
       } else {
-        push(dim(`  未知命令 ${body}（可用 /resume · /name · /model · /login · /memory · /new · /help）`), "");
+        push(dim(`  未知命令 ${body}（可用 /resume · /name · /model · /login · /memory · /sleep · /new · /help）`), "");
         refresh();
       }
       return;
