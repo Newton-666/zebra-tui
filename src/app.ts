@@ -19,7 +19,7 @@ import { KrystalMember } from "./driver-krystal.ts";
 import { loadBotModel, loadBuilder } from "./builder.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
 import { briefText, ensureKit, identityText, identityUpdateText } from "./kit.ts";
-import { conflicts, renderGraph } from "./memory.ts";
+import { conflicts, renderGraph, sleepMemories } from "./memory.ts";
 import { withModel } from "./models.ts";
 import { ModelPicker } from "./view/model-picker.ts";
 import { DEFAULT_COMMANDS } from "./types.ts";
@@ -288,7 +288,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   };
 
   const COMMAND_HELP =
-    "命令: :memory 记忆图 · :conflicts 矛盾 · :model 换模型 · :role 设身份 · :to 锁定 · :brief 重发简报 · :team 重建 · :help · :quit";
+    "命令: :memory 记忆图 · :conflicts 矛盾 · :sleep 睡眠整理 · :model 换模型 · :role 设身份 · :to 锁定 · :brief 重发简报 · :team 重建 · :help · :quit";
   const COMMAND_HELP_FULL = [
     "Krystal 命令（: 与 / 等价）",
     "  :model                 查看各成员当前模型",
@@ -297,6 +297,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     "  :to [成员|all]         锁定默认目标（不加 @ 时发给谁）",
     "  :role <成员> <一句话>   设定/修改该成员的身份并立即注入",
     "  :memory                团队记忆图（krystal board 的断言会记入，带断言者）",
+  "  :sleep                 睡眠整理：模型出策展方案，内核执行 append-only 事件",
     "  :conflicts             矛盾检测：成员断言互相打架时，主动摆到你面前",
     "  :brief [成员]          重发身份与团队简报",
     "  :team                  tmux 引擎丢失时重建",
@@ -321,7 +322,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     if (trimmed.startsWith(":")) {
       // 已知命令处理；未知命令只提示、绝不广播给成员
       const word = trimmed.split(/\s+/)[0]!;
-      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":go", ":team", ":help", ":h", ":memory", ":conflicts"];
+      const known = [":quit", ":q", ":to", ":brief", ":model", ":role", ":go", ":team", ":help", ":h", ":memory", ":conflicts", ":sleep"];
       if (!known.includes(word) && !known.some((k) => word.startsWith(k))) {
         lastAction = `未知命令 ${word}（${COMMAND_HELP}）`;
         renderStatus();
@@ -448,6 +449,20 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       dispatch(targets.length ? targets : [...config.members], msg);
       lastAction = `已派工（${targets.map((t) => t.name).join(",") || "全体"}）：${truncateToWidth(body, 40, "…")}`;
       renderStatus();
+      return;
+    }
+    if (trimmed === ":sleep") {
+      const cfg = loadBuilder();
+      if (!cfg) {
+        flashMsg("睡眠整理需要平台模型——先 /login 或首页配置");
+        renderStatus();
+        return;
+      }
+      flashMsg("睡眠整理中…（模型出策展方案，内核逐条执行 append-only 事件）");
+      void sleepMemories(cfg).then((r) => {
+        flashMsg(r ? `睡眠整理完成：${r.summary}\n报告：${r.reportPath}` : "睡眠整理跳过（库空/进行中）或失败——详见 ~/.krystal/");
+        renderStatus();
+      });
       return;
     }
     if (trimmed === ":memory" || trimmed === ":mem") {

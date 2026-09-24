@@ -9,7 +9,7 @@ import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
 import { decide } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
-import { about, addFact, adjustTrust, conflicts, connect, markUsed, recall, related, renderFacts, supersedeFact } from "./memory.ts";
+import { about, addFact, adjustTrust, conflicts, connect, globalFactCount, markUsed, recall, related, renderFacts, sleepMemories, supersedeFact, SLEEP_HARD, SLEEP_SOFT } from "./memory.ts";
 import { assumedWindow, learnFromErrorMessage } from "./windows.ts";
 
 const execAsync = promisify(exec);
@@ -151,7 +151,7 @@ export interface ToolResult {
   output: string;
 }
 
-export async function executeTool(name: string, rawArgs: string, cwd: string): Promise<ToolResult> {
+export async function executeTool(name: string, rawArgs: string, cwd: string, cfg?: BuilderConfig): Promise<ToolResult> {
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(rawArgs || "{}") as Record<string, unknown>;
@@ -219,6 +219,16 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
       return { ok: true, output: `已编辑 ${path.relative(cwd, file) || "."}（替换 ${args.replace_all ? count : 1} 处）` };
     }
     if (name === "memory") {
+      // 睡眠协议触发（§11.6）：全局活跃事实数——软阈值附提醒，硬阈值先睡再答（owner :sleep 同流程）
+      let sleepNote = "";
+      const factCount = globalFactCount();
+      if (cfg && factCount >= SLEEP_HARD) {
+        const r = await sleepMemories(cfg);
+        sleepNote = r ? `〔睡眠整理已执行：${r.summary} · 报告 ${r.reportPath}〕` : "〔睡眠整理跳过（进行中/失败）——不阻塞〕";
+      } else if (factCount >= SLEEP_SOFT) {
+        sleepNote = `〔记忆库 ${factCount}/${SLEEP_HARD}（软阈值）——建议 owner 执行 :sleep 整理〕`;
+      }
+      const __res = await (async (): Promise<ToolResult> => {
       // 记忆是平台原语（写入的是记忆库，不是仓库）
       const op = String(args.op ?? "");
       const str = (v: unknown) => String(v ?? "").trim();
@@ -269,6 +279,8 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
         };
       }
       return { ok: false, output: `未知 op：${op}` };
+      })();
+      return sleepNote ? { ...__res, output: `${__res.output}\n${sleepNote}` } : __res;
     }
     if (name === "run_command") {
       const cmd = String(args.command ?? "");
@@ -530,7 +542,7 @@ export async function runBotTask(opts: {
       messages.push({ role: "assistant", content: content || null, tool_calls: toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: t.args } })) });
       for (const t of toolCalls) {
         onEvent({ type: "tool_start", id: t.id, name: t.name, args: t.args });
-        const r = await executeTool(t.name, t.args, cwd);
+        const r = await executeTool(t.name, t.args, cwd, cfg);
         onEvent({ type: "tool_result", id: t.id, name: t.name, ok: r.ok, denied: !!r.denied, output: r.output });
         const toolContent = (r.denied ? "[策略闸门拒绝] " : "") + r.output;
         fresh.push({ t: "msg", at: new Date().toISOString(), role: "tool", content: toolContent, toolCallId: t.id });

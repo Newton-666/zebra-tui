@@ -53,6 +53,7 @@ export function outsideCwd(cmd: string, cwd: string): string | undefined {
   const tokens = cmd.split(/\s+/).filter((t) => t && !t.startsWith("-"));
   for (const t of tokens) {
     const p = t.replace(/^[>]{1,2}/, "").replace(/[;|&]+$/, "");
+    if (p === "/dev/null") continue; // 位桶：重定向/参数都无害
     if (!p.startsWith("/") && !p.startsWith("~") && !p.startsWith("..")) continue;
     if (p.startsWith("~")) return p;
     const abs = path.resolve(cwd, p);
@@ -78,7 +79,7 @@ export function decide(cmd: string, cwd: string, exists: (p: string) => boolean 
 
   // ③ 防误删：不许覆盖/截断已存在的数据
   for (const r of redirectTargets(c)) {
-    if (!r.append) {
+    if (!r.append && r.path !== "/dev/null") {
       const abs = path.resolve(cwd, r.path);
       if (exists(abs)) return { allow: false, list: "black", reason: `拒绝截断已存在文件（${r.path}）：用 >> 追加，或先确认` };
     }
