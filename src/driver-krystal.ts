@@ -3,6 +3,8 @@
 // 与独立 Krystal Bot（runBotFlow）共享同一 loop/工具/闸门/记忆，仅入口不同（§12.4：两入口互不干预）。
 import { createBotSession, loadEvents, appendEvent, touchSession } from "./session.ts";
 import { runBotTask, type BotEvent } from "./bot.ts";
+import fs from "node:fs";
+import path from "node:path";
 import { Transcript, ToolBlock, StreamText, UserBlock, BOT_THEME } from "./view/bot-view.ts";
 import { Markdown } from "../deps/pi-tui/dist/index.js";
 import { dim } from "./ui/ansi.ts";
@@ -29,6 +31,7 @@ export interface KrystalMemberOpts {
   cwd: string;                // 团队工作目录
   identity?: string;          // 身份 + 团队简报（SYSTEM 追加）
   sessionId?: string;         // 复用已有会话（驾驶舱 resume）
+  inboxPath?: string;         // 收件箱文件（CLI 无窗格成员降级投递的目标）；轮询合成 [from X] 用户消息
   onRender?: () => void;      // 事件落格后请求重绘
 }
 
@@ -74,6 +77,28 @@ export class KrystalMember {
       this.transcript.items.push("");
     }
     this.replayFrom(evs);
+    // 收件箱轮询：CLI 无窗格降级投递（sessions/<团队>/inbox/<id>.jsonl）→ 合成 [from X] 用户消息。
+    // 500ms；文件不存在/无新字节都是常态，吞掉。字节偏移记在实例上，启动即从头收（不漏回放前落盘的信）。
+    if (opts.inboxPath) {
+      let offset = 0;
+      const timer = setInterval(() => {
+        try {
+          const buf = fs.readFileSync(opts.inboxPath!);
+          if (buf.length <= offset) return; // 无新内容
+          const chunk = buf.subarray(offset).toString("utf8");
+          offset = buf.length;
+          for (const line of chunk.split("\\n")) {
+            const s = line.trim();
+            if (!s) continue;
+            try {
+              const j = JSON.parse(s);
+              if (j && j.text) this.send(\`[from \${j.from ?? "?"}] \${j.text}\`);
+            } catch { /* 半行/坏行：下次不再重读，跳过 */ }
+          }
+        } catch { /* 收件箱尚不存在：常态 */ }
+      }, 500);
+      timer.unref?.();
+    }
   }
 
   /** 可见性备注（身份/简报注入等，与 tmux 成员的注入消息对等） */

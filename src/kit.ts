@@ -108,8 +108,19 @@ function cmdSend(c, args) {
   }
   const pane = c.paneIds && c.paneIds[target.id];
   if (!pane) {
-    console.error(\`队友「\${target.name}」没有可用的窗格（请让 Krystal 执行 :team 重建）\`);
-    process.exit(1);
+    // 无窗格成员（内置 krystal）：降级投递到收件箱文件，Krystal 进程内轮询收取。
+    // 协议对等：send 接口不变，投递方式按成员身体分流（窗格注入 / 收件箱落盘）。
+    if (target.type !== "krystal") {
+      console.error(\`队友「\${target.name}」的窗格不存在（CLI 成员异常退出——请在 Krystal 里执行 :team 重建）\`);
+      process.exit(1);
+    }
+    const inboxDir = path.join(HOME, "inbox");
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.appendFileSync(path.join(inboxDir, target.id + ".jsonl"), JSON.stringify({ from: self.name, text, at: new Date().toISOString() }) + "\\n");
+    appendHistory({ t: new Date().toISOString(), type: "relay", from: self.name, to: target.name, text, via: "inbox" });
+    try { fs.writeFileSync(relayPath, \`\${self.name} → \${target.name}: \${text}\`); } catch {}
+    console.log(\`已投递到 \${target.name} 的收件箱: \${text}\`);
+    return;
   }
   if (!paneAlive(pane)) {
     console.error(\`队友「\${target.name}」的窗格已退出（请让 Krystal 执行 :team 重建）\`);

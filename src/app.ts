@@ -120,6 +120,8 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       cwd: config.cwd,
       identity,
       sessionId: config.memberSessions?.[m.id],
+      // 收件箱：CLI send 对无窗格成员的降级投递目标（kit.ts cmdSend 写入，此处轮询收取）
+      inboxPath: path.join(sessionDir(config.id), "inbox", m.id + ".jsonl"),
       onRender: () => tui.requestRender(),
     });
     krystal.set(m.id, km);
