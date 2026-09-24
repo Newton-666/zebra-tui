@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { learnWindow } from "./windows.ts";
 
 export interface BuilderConfig {
   baseUrl: string; // OpenAI 兼容根地址（含 /v1），例：https://api.example.com/v1
@@ -119,10 +120,16 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
 ];
 
 /** 动态拉取模型列表（GET /models）——provider 侧上新模型自动可见 */
-export async function fetchModels(
-  cfg: { baseUrl: string; apiKey: string },
-  signal?: AbortSignal,
-): Promise<string[]> {
+export interface ModelInfo {
+  id: string;
+  /** provider 上报的上下文窗口（有就抓；不回报则 undefined，走报错学习/手改） */
+  contextTokens?: number;
+}
+
+/** 各家可能用的窗口字段名（OpenRouter/vLLM/LM Studio/Ollama 风格不一） */
+const CONTEXT_FIELDS = ["context_length", "context_window", "max_context_length", "max_model_len", "max_input_tokens"];
+
+export async function fetchModelInfos(cfg: { baseUrl: string; apiKey: string }, signal?: AbortSignal): Promise<ModelInfo[]> {
   let res: Response;
   try {
     res = await fetch(`${cfg.baseUrl}/models`, {
@@ -134,10 +141,32 @@ export async function fetchModels(
     throw new Error(/timeout|abort|TimeoutError/i.test(msg) ? "拉取超时——检查网络" : `连接失败：${msg}`);
   }
   if (!res.ok) throw friendlyHttp(res.status, await res.text().catch(() => ""));
-  const data = (await res.json().catch(() => undefined)) as { data?: { id?: unknown }[] } | undefined;
-  const ids = (data?.data ?? []).map((m) => String(m?.id ?? "")).filter(Boolean).sort();
-  if (!ids.length) throw new Error("端点返回了空模型列表——确认 baseUrl 正确，或改用手动输入模型 id");
-  return ids;
+  const data = (await res.json().catch(() => undefined)) as { data?: Record<string, unknown>[] } | undefined;
+  const infos: ModelInfo[] = [];
+  for (const raw of data?.data ?? []) {
+    const id = String(raw?.id ?? "");
+    if (!id) continue;
+    let contextTokens: number | undefined;
+    for (const f of CONTEXT_FIELDS) {
+      const v = raw[f];
+      if (typeof v === "number" && v > 0) {
+        contextTokens = v;
+        break;
+      }
+    }
+    if (contextTokens === undefined) {
+      const tp = raw.top_provider as { context_length?: unknown } | undefined; // OpenRouter 嵌套风格
+      if (typeof tp?.context_length === "number") contextTokens = tp.context_length;
+    }
+    if (contextTokens) learnWindow(id, contextTokens); // 上报即学习 → 阈值/百分比全链路生效
+    infos.push({ id, contextTokens });
+  }
+  if (!infos.length) throw new Error("端点返回了空模型列表——确认 baseUrl 正确，或改用手动输入模型 id");
+  return infos.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export async function fetchModels(cfg: { baseUrl: string; apiKey: string }, signal?: AbortSignal): Promise<string[]> {
+  return (await fetchModelInfos(cfg, signal)).map((m) => m.id);
 }
 
 export interface ChatOptions {

@@ -20,7 +20,7 @@ import {
 } from "../../deps/pi-tui/dist/index.js";
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
-import { fetchModels, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig } from "../builder.ts";
+import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
 import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
@@ -588,6 +588,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   };
 
   /** /model：切 Krystal Bot 自己的模型（动态拉取；与平台搭建模型分离，只写 config.json 的 bot.model） */
+  const ctxNote = (t?: number): string => (t ? `${Math.round(t / 1000)}k 窗口` : "窗口未知");
   const openModelPicker = (): void => {
     if (!cfg) {
       push(dim("  未配置 API——先用 /login 配置（与平台共用凭据）"), "");
@@ -596,13 +597,17 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     }
     push(dim(`  正在拉取模型列表（${cfg.baseUrl}）…`), "");
     refresh();
-    void fetchModels({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey })
-      .then((models) => {
+    void fetchModelInfos({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey })
+      .then((infos: ModelInfo[]) => {
         const picker = new ListOverlay({
           title: "Krystal Bot 模型（与平台搭建模型分离）",
           hint: "↑↓ 选择 · enter 确认 · esc 取消",
           items: [
-            ...models.map((m) => ({ value: m, label: m, description: m === cfg!.model ? "当前" : "" })),
+            ...infos.map((m) => ({
+              value: m.id,
+              label: m.id,
+              description: m.id === cfg!.model ? `当前 · ${ctxNote(m.contextTokens)}` : ctxNote(m.contextTokens),
+            })),
             { value: "__manual", label: "手动输入模型 id…", description: "列表里没有时使用" },
           ],
           onPick: (v) => {
@@ -670,13 +675,13 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       if (!draft.baseUrl || !draft.apiKey) return;
       push(dim(`  正在拉取模型列表（${draft.baseUrl}）…`), "");
       refresh();
-      void fetchModels({ baseUrl: draft.baseUrl, apiKey: draft.apiKey })
-        .then((models) => {
+      void fetchModelInfos({ baseUrl: draft.baseUrl, apiKey: draft.apiKey })
+        .then((infos: ModelInfo[]) => {
           const picker = new ListOverlay({
             title: `选择模型（${providerLabel}，动态拉取——测试通过后才保存）`,
             hint: "↑↓ 选择 · enter 确认 · esc 取消",
             items: [
-              ...models.map((m) => ({ value: m, label: m, description: "" })),
+              ...infos.map((m) => ({ value: m.id, label: m.id, description: ctxNote(m.contextTokens) })),
               { value: "__manual", label: "手动输入模型 id…", description: "列表里没有时使用" },
             ],
             onPick: (v) => {

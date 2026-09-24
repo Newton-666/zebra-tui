@@ -3,6 +3,7 @@
 // 团队与 Bot 共用同一形态：sessions/<id>/ 下 team.json（团队）或 bot.json（原生成员）+ events.jsonl
 import fs from "node:fs";
 import path from "node:path";
+import { assumedWindow, getWindow } from "./windows.ts";
 import { SESSIONS_DIR } from "./team.ts";
 
 export interface BotMeta {
@@ -219,29 +220,19 @@ export function messagesFrom(events: SessionEvent[]): { role: string; content?: 
   return out;
 }
 
-/** 模型上下文窗口（内置常见表；不猜不探测，未知按 128k） */
-const WINDOWS: [RegExp, number][] = [
-  // 按智谱官方规格：4.5 系 128K · 4.6/4.7 200K · glm-5.3 家族 1M
-  // （1M 为向端点探测所得：glm-5.3-flash 实测 ≥958k prompt 成功，2026-09-24；
-  //   旧表写 200k 导致百分比虚高、折叠/摘要阈值提前触发）
-  [/^glm-4\.5/, 128_000],
-  [/^glm-4\.[67]/, 200_000],
-  [/^glm-5/, 1_000_000],
-  [/^glm-4(-flash|-air|-long)?$/, 128_000],
-  [/deepseek/, 128_000],
-  [/qwen|qwq/, 131_072],
-  [/kimi|moonshot/, 128_000],
-  [/gpt-4o|gpt-4-turbo|gpt-4\.1|o[134]/, 128_000],
-  [/claude/, 200_000],
-  [/gemini/, 1_000_000],
-];
-export const contextWindow = (model: string): number => WINDOWS.find(([re]) => re.test(model))?.[1] ?? 128_000;
+/** 模型上下文窗口：动态获取（provider 上报 / 超限报错学习 / 人手改 windows.json），不硬编码（spec §12.4 #18） */
+export const contextWindow = (model: string): number | undefined => getWindow(model);
 
 export interface ContextStatus { pct: number; level: "ok" | "fold" | "summarize"; label: string }
-/** 窗口占用与阈值级别（折叠线 70% / 摘要线 85%，与 context.ts 的触发阈值一致） */
+/** 窗口占用与阈值级别（折叠线 70% / 摘要线 85%，与 context.ts 的触发阈值一致）。
+ *  窗口未知 → 按保守假设算阈值，标签改显绝对量 + 「估」，不显示误导性的百分比 */
 export function contextStatus(promptTokens: number, model: string, foldRatio = 0.7, summarizeRatio = 0.85): ContextStatus {
-  const pct = Math.max(0, Math.round((promptTokens / contextWindow(model)) * 100));
-  const level: ContextStatus["level"] = promptTokens >= contextWindow(model) * summarizeRatio ? "summarize" : promptTokens >= contextWindow(model) * foldRatio ? "fold" : "ok";
-  const label = `上下文 ${pct}%${level === "fold" ? "（折叠线）" : level === "summarize" ? "（摘要线）" : ""}`;
+  const win = getWindow(model);
+  const base = win ?? assumedWindow;
+  const pct = Math.max(0, Math.round((promptTokens / base) * 100));
+  const level: ContextStatus["level"] = promptTokens >= base * summarizeRatio ? "summarize" : promptTokens >= base * foldRatio ? "fold" : "ok";
+  const label = win
+    ? `上下文 ${pct}%${level === "fold" ? "（折叠线）" : level === "summarize" ? "（摘要线）" : ""}`
+    : `上下文 ~${Math.max(1, Math.round(promptTokens / 1000))}k（窗口未知·按128k估）`;
   return { pct, level, label };
 }

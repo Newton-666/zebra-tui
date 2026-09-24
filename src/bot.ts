@@ -10,6 +10,7 @@ import { assembleContext, estimateTokens, summarize, withSystem } from "./contex
 import { decide, modeLabel, type Mode } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
 import { about, addFact, adjustTrust, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts, supersedeFact } from "./memory.ts";
+import { assumedWindow, learnFromErrorMessage } from "./windows.ts";
 
 const execAsync = promisify(exec);
 
@@ -455,7 +456,7 @@ export async function runBotTask(opts: {
   const mem = memoryBlock();
   const system = SYSTEM(cwd, mode === "full" ? "写作者" : "阅读者", mode) + (mem ? `\n\n${mem}` : "");
   const tools = TOOLS_FOR(mode);
-  const win = contextWindow(cfg.model);
+  const win = contextWindow(cfg.model) ?? assumedWindow; // 窗口未知 → 128k 保守假设（报错学习会自动纠准）
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));
   const summarizeAt = Number(process.env.KRYSTAL_CONTEXT_SUMMARIZE_AT ?? Math.round(win * 0.85));
   const keepRecent = 6;
@@ -507,6 +508,7 @@ export async function runBotTask(opts: {
           break;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          learnFromErrorMessage(cfg.model, msg); // 上下文超限报错 → 学习真实窗口（下次阈值即准）
           if (signal?.aborted) {
             onEvent({ type: "error", message: "已中断" });
             return;
@@ -542,6 +544,7 @@ export async function runBotTask(opts: {
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    learnFromErrorMessage(cfg.model, msg);
     onEvent({ type: "error", message: /abort/i.test(msg) ? "已中断" : msg });
   }
 }
