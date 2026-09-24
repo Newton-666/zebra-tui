@@ -803,7 +803,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   const workingComp: Component = {
     render(w: number): string[] {
       if (!busy) return [];
-      return [truncateToWidth(`${fg(BLUE_LIGHT, SPINNER[Math.floor(workingTick / 2) % SPINNER.length]!)} ${sweep(stateEn(state), workingTick)}`, w, "")];
+      // 尾部留一行空白：和下面的状态行/输入框保持呼吸感
+      return [truncateToWidth(`${fg(BLUE_LIGHT, SPINNER[Math.floor(workingTick / 2) % SPINNER.length]!)} ${sweep(stateEn(state), workingTick)}`, w, ""), ""];
     },
     invalidate(): void {},
   };
