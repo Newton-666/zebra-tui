@@ -90,6 +90,43 @@ export const ROSE_ART_MINI: string[] = [
   "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠀⠉⠢⡵⠿⠃⠁⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 ];
 
+// ── 工作指示用超小玫瑰：MINI 点阵 2×2 合一（56×56 点 → 28×28 点 = 14×7 字符）。
+// 纯程序化降采样（OR 池化保轮廓），零新数据 —— 给「thinking 工作指示」用。
+const brailleBits = (ch: string): number => {
+  const code = ch.codePointAt(0)!;
+  return code >= 0x2800 && code <= 0x28ff ? code - 0x2800 : -1;
+};
+function downsample2x(rows: string[]): string[] {
+  const H = rows.length * 4;
+  const Wd = Math.max(...rows.map((r) => [...r].length)) * 2;
+  const dots: boolean[][] = Array.from({ length: H }, () => Array(Wd).fill(false));
+  rows.forEach((row, sr) => {
+    [...row].forEach((ch, sc) => {
+      const bits = brailleBits(ch);
+      if (bits < 0) return;
+      for (let c = 0; c < 2; c++)
+        for (let r = 0; r < 4; r++) if (bits & (1 << (c * 4 + r))) dots[sr * 4 + r][sc * 2 + c] = true;
+    });
+  });
+  const out: string[] = [];
+  for (let tr = 0; tr < H / 8; tr++) {
+    let line = "";
+    for (let tc = 0; tc < Wd / 4; tc++) {
+      let bits = 0;
+      for (let c = 0; c < 2; c++)
+        for (let r = 0; r < 4; r++) {
+          let any = false;
+          for (const dy of [0, 1]) for (const dx of [0, 1]) any = any || dots[(tr * 4 + r) * 2 + dy]?.[(tc * 2 + c) * 2 + dx];
+          if (any) bits |= 1 << (c * 4 + r);
+        }
+      line += String.fromCodePoint(0x2800 + bits);
+    }
+    out.push(line);
+  }
+  return out;
+}
+export const ROSE_ART_WORKING: string[] = downsample2x(ROSE_ART_MINI);
+
 export interface PortraitInfo {
   name: string;
   model: string;

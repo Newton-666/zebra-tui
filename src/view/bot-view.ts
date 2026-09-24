@@ -22,7 +22,7 @@ import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.t
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
 import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts";
-import { renderPortrait } from "../ui/portrait.ts";
+import { renderPortrait, ROSE_ART_WORKING } from "../ui/portrait.ts";
 import {
   appendEvent,
   contextStatus,
@@ -772,6 +772,33 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     },
     invalidate(): void {},
   };
+  // ── 工作指示（pi 的 Working 同型）：busy 时显示——左玫瑰（渐变光带流动）+ 右 spinner·状态
+  const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let workingTick = 0;
+  const workingComp: Component = {
+    render(w: number): string[] {
+      if (!busy) return [];
+      const spin = fg(BLUE_LIGHT, SPINNER[Math.floor(workingTick / 2) % SPINNER.length]!);
+      const mid = Math.floor(ROSE_ART_WORKING.length / 2) - 1;
+      return ROSE_ART_WORKING.map((row, r) => {
+        let line = "";
+        [...row].forEach((ch, col) => {
+          line += ch === "⠀" || ch === " " ? " " : fg(KRYSTAL_GRADIENT[(col + r + workingTick) % KRYSTAL_GRADIENT.length]!, ch);
+        });
+        if (r === mid) line += "  " + spin + " " + state;
+        return truncateToWidth(line, w, "");
+      });
+    },
+    invalidate(): void {},
+  };
+  const workingTimer = setInterval(() => {
+    if (busy) {
+      workingTick++;
+      tui.requestRender();
+    }
+  }, 150);
+  workingTimer.unref?.();
+
   const inputFrame: Component = {
     render(w: number): string[] {
       // Editor 总会画一个 \x1b[7m 反色软件光标块（终端主题下会显成粉/白），
@@ -1077,6 +1104,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     new VStack([
       { component: scroll, basis: 0, grow: 1, minSize: 1 },
       { component: gapComp, basis: 1 },
+      { component: workingComp, basis: "auto" },
       { component: statusComp, basis: "auto" },
       { component: inputFrame, basis: "auto" },
     ]),
