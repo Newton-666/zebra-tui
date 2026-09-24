@@ -5,6 +5,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { chat, type BuilderConfig } from "./builder.ts";
+import { fg } from "./ui/ansi.ts";
 
 export interface Fact {
   id: string;
@@ -272,6 +274,132 @@ export function conflicts(scope?: string): { a: Fact; b: Fact; reason: string }[
 
 // ---------- 人可读镜像（LN-1 形状：运行时真源是 jsonl，md 是人的入口） ----------
 
+// ── 睡眠协议（/sleep，spec §11.6 草案）：睡眠 = 压缩的兄弟
+// 模型只出策展方案、内核只执行 append-only 事件（同 summarize 分工）。
+// 触发：全局活跃事实数（不含 scope）软阈值 85 → memory 工具返回附提醒；
+//       硬阈值 100 → 下次 memory 调用先睡再答；owner 手动 :sleep 强制同流程。
+// 事件全部走既有三原语：addFact / supersedeFact / adjustTrust（+ entities patch）——零新 schema。
+export const SLEEP_SOFT = 85;
+export const SLEEP_HARD = 100;
+
+let sleepRunning = false; // 防重入旗：睡眠中再调 memory 直接放行查询
+
+export function globalFactCount(): number {
+  return activeFacts(loadFacts()).filter((f) => !f.scope).length;
+}
+
+const SLEEP_PLAN_PROMPT = (list: string) =>
+  `你是记忆策展人。下面是 Krystal 全局活跃事实清单（[id] 内容 · 实体 · trust · 证据）。
+按分类标准四问（用户偏好/项目事实/坑与修法/会话状态）与实体纪律（具体名词>宽泛标签，一条 1-4 个实体）策展：
+- merge：同主题多条 → 合并为一条（text + entities）
+- supersede：表述过时/被新事实取代 → 给出新文本
+- retag：实体挂错或太宽泛 → 重挂实体（具体名词，1-4 个）
+- promote：确实有用但 trust 偏低 → 升 trust
+- drop：会话状态类/无价值 → 退役（降权沉底，原文保留）
+只输出 JSON，不要 markdown 围栏，不确定的条目不要动：
+{"merge":[{"sources":["id","id"],"text":"…","entities":["…"]}],"supersede":[{"id":"…","text":"…"}],"retag":[{"id":"…","entities":["…"]}],"promote":["id"],"drop":["id"]}
+清单：
+${list}`;
+
+export interface SleepEvent {
+  sign: "+" | "−" | "~"; // + 新增/合并结果 · − 被覆盖/退役 · ~ 重挂/升降权
+  id: string;
+  text: string;
+  note?: string;
+}
+export interface SleepResult {
+  applied: number;
+  skipped: number;
+  reportPath: string;
+  summary: string;
+  /** 结构化事件流（供 UI 做 diff 展示与记忆图变更标注） */
+  events: SleepEvent[];
+}
+
+/** 睡眠整理：打包全局活跃事实 → 模型出策展方案 → 内核逐条应用 append-only 事件 → 报告落盘。
+ *  失败/进行中返回 undefined（调用方附注跳过，不阻塞）。 */
+export async function sleepMemories(cfg: BuilderConfig): Promise<SleepResult | undefined> {
+  if (sleepRunning) return undefined;
+  const facts = activeFacts(loadFacts()).filter((f) => !f.scope);
+  if (!facts.length) return undefined;
+  sleepRunning = true;
+  try {
+    const events: SleepEvent[] = [];
+    const list = facts
+      .map((f, i) => `${i + 1}. [${f.id}] ${f.text}  实体[${f.entities.join(",")}] trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`)
+      .join("\n");
+    const raw = await chat(cfg, SLEEP_PLAN_PROMPT(list), { timeoutMs: 120_000, maxTokens: 4096 });
+    const cleaned = raw.replace(/^\s*```(?:json)?/, "").replace(/```\s*$/, "").trim();
+    const ps = cleaned.indexOf("{"), pe = cleaned.lastIndexOf("}");
+    if (ps < 0 || pe <= ps) return undefined;
+    const plan = JSON.parse(cleaned.slice(ps, pe + 1)) as {
+      merge?: { sources?: string[]; text?: string; entities?: string[] }[];
+      supersede?: { id?: string; text?: string }[];
+      retag?: { id?: string; entities?: string[] }[];
+      promote?: string[];
+      drop?: string[];
+    };
+    const byId = new Map(facts.map((f) => [f.id, f]));
+    let applied = 0, skipped = 0;
+    const log: string[] = [];
+    const mark = (ok: boolean, line: string) => (ok ? applied++ : skipped++, log.push((ok ? "✓ " : "✗ ") + line));
+    for (const m of plan.merge ?? []) {
+      const src = (m.sources ?? []).filter((id) => byId.has(id));
+      if (src.length < 2 || !m.text?.trim()) { mark(false, `merge 缺源或文本`); continue; }
+      const nf = addFact({ text: m.text.trim(), entities: m.entities ?? [], by: "sleep" });
+      src.forEach((id) => {
+        if (id === nf.id) return;
+        append({ t: "supersede", id, by: nf.id, at: new Date().toISOString() });
+        events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "被合并覆盖" });
+      });
+      events.push({ sign: "+", id: nf.id, text: m.text.trim() });
+      mark(true, `merge ${src.join(" + ")} → [${nf.id}] ${m.text.trim().slice(0, 40)}`);
+    }
+    for (const sItem of plan.supersede ?? []) {
+      const id = sItem.id ?? "";
+      if (!byId.has(id) || !sItem.text?.trim()) { mark(false, `supersede ${id} 无效`); continue; }
+      const nf = supersedeFact(id, { text: sItem.text.trim(), entities: byId.get(id)!.entities, by: "sleep" });
+      events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "被取代" });
+      if (nf) events.push({ sign: "+", id: nf.id, text: nf.text });
+      mark(!!nf, `supersede [${id}] → [${nf?.id}] ${sItem.text.trim().slice(0, 40)}`);
+    }
+    for (const rItem of plan.retag ?? []) {
+      const id = rItem.id ?? "";
+      if (!byId.has(id) || !rItem.entities?.length) { mark(false, `retag ${id} 无效`); continue; }
+      append({ t: "fact_update", id, patch: { entities: rItem.entities.slice(0, 8), updated: new Date().toISOString() } });
+      events.push({ sign: "~", id, text: byId.get(id)?.text ?? id, note: `实体重挂 [${rItem.entities.join(",")}]` });
+      mark(true, `retag [${id}] ← [${rItem.entities.join(",")}]`);
+    }
+    for (const id of plan.promote ?? []) {
+      if (!byId.has(id)) { mark(false, `promote ${id} 无效`); continue; }
+      adjustTrust(id, 0.2);
+      events.push({ sign: "~", id, text: byId.get(id)?.text ?? id, note: "trust +0.2" });
+      mark(true, `promote [${id}] trust +0.2`);
+    }
+    for (const id of plan.drop ?? []) {
+      if (!byId.has(id)) { mark(false, `drop ${id} 无效`); continue; }
+      adjustTrust(id, -0.4); // 退役=降权沉底（trust 下限 0.1，recall 排序沉底；原文永不删除）
+      events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "退役降权（原文保留）" });
+      mark(true, `drop [${id}] trust −0.4（退役沉底，原文保留）`);
+    }
+    writeMirror();
+    const after = globalFactCount();
+    const reportPath = path.join(DIR, `sleep-report-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`);
+    const report = [
+      `# 睡眠报告 ${new Date().toISOString()}`,
+      "", `- 睡前全局活跃事实：${facts.length}`, `- 醒后：${after}`, `- 应用 ${applied} 条 · 跳过 ${skipped} 条`, "",
+      "## 事件明细", ...log, "",
+      "## 原则", "- 全部 append-only（supersede/降权），原文永不删除；本报告即审计链。",
+    ].join("\n");
+    try { fs.writeFileSync(reportPath, report + "\n"); } catch { /* 降级 */ }
+    return { applied, skipped, reportPath, summary: `应用 ${applied} · 跳过 ${skipped} · 库 ${facts.length}→${after}`, events };
+  } catch {
+    return undefined;
+  } finally {
+    sleepRunning = false;
+  }
+}
+
 export function writeMirror(): void {
   try {
     const facts = activeFacts(loadFacts()).slice().sort((a, b) => (a.created < b.created ? -1 : 1));
@@ -375,7 +503,11 @@ export const renderFacts = (facts: Fact[], emptyHint = "（没有匹配的记忆
 
 export interface GraphView { lines: string[]; facts: number; entities: number; superseded: number; edges: number; conflicts: number }
 
-export function renderGraph(scope?: string): GraphView {
+export interface SleepMarks {
+  greenIds: Set<string>; // 睡眠中新增/修改的事实 id（图中标绿）
+  retired: { id: string; text: string; note?: string }[]; // 被覆盖/退役的旧知（单列标红）
+}
+export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
   const all = loadFacts().filter((f) => !scope || f.scope === scope);
   const active = activeFacts(all);
   const superseded = all.length - active.length;
@@ -412,8 +544,13 @@ export function renderGraph(scope?: string): GraphView {
     lines.push("", `● ${e} (${list.length})`);
     list.forEach((f, i) => {
       const branch = i === list.length - 1 ? "└─" : "├─";
-      lines.push(`  ${branch} [${f.id}] ${f.text}  · ${f.by} · trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`);
+      const seg = `[${f.id}] ${f.text}  · ${f.by} · trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`;
+      lines.push(`  ${branch} ` + (marks?.greenIds.has(f.id) ? fg("38;5;71", seg) : seg));
     });
+  }
+  if (marks?.retired.length) {
+    lines.push("", "睡眠覆盖（旧知保留可审计）：");
+    for (const r of marks.retired) lines.push(fg("38;5;218", `  − [${r.id}] ${r.text}${r.note ? ` · ${r.note}` : ""}`));
   }
   const orphan = active.filter((f) => !f.entities.length);
   if (orphan.length) {

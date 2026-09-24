@@ -21,7 +21,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
-import { activeFacts, globalFactCount, importMirror, loadFacts, renderGraph, sleepMemories } from "../memory.ts";
+import { activeFacts, globalFactCount, importMirror, loadFacts, renderGraph, sleepMemories, type SleepMarks } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
@@ -1091,7 +1091,25 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         push(dim(`  睡眠整理中…（全局活跃事实 ${globalFactCount()} 条；模型出策展方案，内核逐条执行 append-only 事件）`), "");
         refresh();
         void sleepMemories(cfg).then((r) => {
-          push(dim(r ? `  睡眠整理完成：${r.summary}\n  报告：${r.reportPath}` : "  睡眠整理跳过（库空/进行中）或失败——详见 ~/.krystal/"), "");
+          if (!r) {
+            push(dim("  睡眠整理跳过（库空/进行中）或失败——详见 ~/.krystal/"), "");
+            refresh();
+            return;
+          }
+          // 分支样式：╰─ ● sleep · 摘要，下面逐条 diff（绿 + 新增/合并 · 红 − 覆盖/退役 · 绿 ~ 重挂/升权）
+          push(`  ${dim("╰─")} ${fg(BLUE, "●")} ${bold("sleep")} ${dim(r.summary)}`, "");
+          for (const ev of r.events) {
+            const mark = ev.sign === "−" ? fg("38;5;218", "−") : fg("38;5;71", ev.sign);
+            push("      " + mark + " " + dim(`[${ev.id}] ${ev.text}${ev.note ? ` · ${ev.note}` : ""}`));
+          }
+          // 睡眠后记忆图（变更条目标绿，被覆盖旧知单列红）
+          const marks: SleepMarks = {
+            greenIds: new Set(r.events.filter((e) => e.sign !== "−").map((e) => e.id)),
+            retired: r.events.filter((e) => e.sign === "−").map((e) => ({ id: e.id, text: e.text, note: e.note })),
+          };
+          const g = renderGraph(undefined, marks);
+          push("", ...g.lines.map((l) => (l.includes("\x1b[38;5;71m") ? l : l.startsWith("●") || l.startsWith("○") ? fg("36", l) : dim(l))), "");
+          push(dim(`  报告：${r.reportPath}`), "");
           refresh();
         });
         return;
