@@ -379,7 +379,8 @@ v0 进程内 async loop（实现 MemberDriver 契约，随时可拆成独立进�
 
 ### 11.6 反馈与信号（最小版）
 
-- `remember(text, entities)` — 写入（准入 = 显式，不做"未来复用概率"预测器）
+- `remember(text, entities)` — 写入（准入 = 显式，不做"未来复用概率"预测器；agent 在工作中主动沉淀也是显式
+  工具调用，同样可审计 —— 见 §12.4 #17：事件驱动指的是 agent 自己养成习惯，不是框架背后静默抽取）
 - `helpful(id)` / `wrong(id)` — 调整 trust（**显式、可审计**；比自动信号分更可靠）✓ 已实现（+0.2 / −0.3）
 - `supersede(id, newText)` — 取代：旧条标 `superseded_by`，**不删** ✓ 已实现
 - 以上都挂在**一个** `memory` 工具上（九个 op：remember/recall/about/related/connect/conflicts/helpful/wrong/supersede）
@@ -499,6 +500,7 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
 | 14 | 模型调用失败重试：3 次尝试（首发 + 2 次重试）· 间隔 10 秒 · 三次拉不起来就停 | **是** |
 | 15 | 会话入口：进入即新会话，历史用对话内 `/resume` 回溯（向导不设菜单） | **是** |
 | 16 | 记忆持续更新：同主实体注入只保留最新认知（旧条 recall 可回）＋ remember 回显「相关旧知」引导 supersede | **是** |
+| 17 | 记忆形成事件驱动：agent 在工作中主动沉淀（常驻系统提示指令，收尾前先沉淀）；框架不做静默自动抽取 | **是** |
 
 ## 13. 简洁性约束：不复杂化，以缓存命中率为判据
 
