@@ -57,26 +57,36 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
   if (sessionAlive(name)) killSession(name);
   ensureKit(config); // 生成 bin/krystal + BRIEF.md
 
-  /** 本次启动命令：可用 commands 覆盖（resume 时避免改动 config.members 的原始命令） */
-  const cmdOf = (i: number) => commands?.[i] ?? config.members[i]!.command;
-  const first = config.members[0];
-  // -x/-y: detached 会话默认 80x24，split 后每格过小，部分 TUI 会直接退出
-  tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", ...envArgs(config, first), "-c", config.cwd, cmdOf(0)]);
+  const cliIdx = config.members.map((m, i) => (m.type === "krystal" ? -1 : i)).filter((i) => i >= 0);
+  const paneIds: string[] = config.members.map(() => ""); // 与 members 对齐；krystal 成员无窗格
+  if (!cliIdx.length) {
+    // 全原生团队：tmux 引擎室都不需要
+    config.layoutVersion = LAYOUT_VERSION;
+    config.paneIds = {};
+    config.members.forEach((m) => (config.paneIds![m.id] = ""));
+    saveTeamConfig(config);
+    return paneIds;
+  }
 
-  const cols = columnCount(config.members.length);
+  const cmdOf = (mi: number) => commands?.[mi] ?? config.members[mi]!.command;
+  const first = cliIdx[0]!;
+  // -x/-y: detached 会话默认 80x24，split 后每格过小，部分 TUI 会直接退出
+  tmux(["new-session", "-d", "-s", name, "-n", "agents", "-x", "220", "-y", "52", ...envArgs(config, config.members[first]!), "-c", config.cwd, cmdOf(first)]);
+
+  const cols = columnCount(cliIdx.length);
   // 每个 pane 创建后立刻 remain-on-exit，命令秒退也不会破坏链路
-  const paneIds: string[] = [];
   const firstId = tmux(["list-panes", "-t", name, "-F", "#{pane_id}"]).trim();
-  paneIds.push(firstId);
+  paneIds[first] = firstId;
   tmux(["set-option", "-p", "-t", firstId, "remain-on-exit", "on"]);
-  for (let i = 1; i < config.members.length; i++) {
-    const anchor = i < cols ? paneIds[i - 1]! : paneIds[i - cols]!;
-    const flags = i < cols ? ["-h"] : ["-v"];
+  for (let k = 1; k < cliIdx.length; k++) {
+    const mi = cliIdx[k]!;
+    const anchor = k < cols ? paneIds[cliIdx[k - 1]!]! : paneIds[cliIdx[k - cols]!]!;
+    const flags = k < cols ? ["-h"] : ["-v"];
     // 注意: -P -F 必须放在命令串之前，否则会被吞进命令里
     const out = tmux([
       "split-window",
       ...flags,
-      ...envArgs(config, config.members[i]),
+      ...envArgs(config, config.members[mi]!),
       "-t",
       anchor,
       "-c",
@@ -84,14 +94,15 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
       "-P",
       "-F",
       "#{pane_id}",
-      cmdOf(i),
+      cmdOf(mi),
     ]);
     const id = out.trim();
-    if (!id) throw new Error(`split-window 未返回 pane id (成员 ${config.members[i].name})`);
-    paneIds.push(id);
+    if (!id) throw new Error(`split-window 未返回 pane id (成员 ${config.members[mi]!.name})`);
+    paneIds[mi] = id;
     tmux(["set-option", "-p", "-t", id, "remain-on-exit", "on"]);
   }
   config.members.forEach((m, i) => {
+    if (!paneIds[i]) return;
     try {
       tmux(["select-pane", "-t", paneIds[i], "-T", `zebra:${m.name}`]);
     } catch {
@@ -99,10 +110,10 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
     }
   });
   // 创建完成校验：任何秒退的成员当场复活一次
-  config.members.forEach((m, i) => {
-    if (!paneAlive(paneIds[i]!)) {
+  cliIdx.forEach((mi) => {
+    if (!paneAlive(paneIds[mi]!)) {
       try {
-        respawnPane(config, m, paneIds[i]!);
+        respawnPane(config, config.members[mi]!, paneIds[mi]!);
       } catch {
         /* poller 会继续重试 */
       }
@@ -118,28 +129,31 @@ export function createTeamSession(config: TeamConfig, commands?: string[]): stri
   return paneIds;
 }
 
-/** Ensure session exists with ALL member panes alive; rebuild if incomplete. Returns pane ids in member order. */
 export function ensureTeamSession(config: TeamConfig, useResume: boolean): string[] {
   const name = config.tmuxSession;
+  const cliCount = config.members.filter((m) => m.type !== "krystal").length;
+  const aligned = (): string[] => config.members.map((m) => config.paneIds?.[m.id] ?? "");
   // 排布规则升级 → 引擎窗格与网格不再对齐，重建一次（成员用各自的 resume 命令，上下文由 agent 自身持久化）
-  if (config.layoutVersion !== LAYOUT_VERSION && sessionAlive(name)) {
-    killSession(name);
-  }
+  if (config.layoutVersion !== LAYOUT_VERSION && sessionAlive(name)) killSession(name);
   if (sessionAlive(name)) {
-    // 1) 持久化映射且全部存活 → 直接用
     if (config.paneIds) {
-      const mapped = config.members.map((m) => config.paneIds![m.id]).filter(Boolean) as string[];
-      if (mapped.length === config.members.length && mapped.every((id) => paneAlive(id))) return mapped;
+      // 1) 持久化映射且覆盖全员、cli 窗格全部存活 → 直接用
+      const mapped = aligned();
+      const cliPanes = mapped.filter(Boolean);
+      if (mapped.length === config.members.length && cliPanes.length === cliCount && mapped.every((p) => !p || paneAlive(p))) return mapped;
     }
-    // 2) 现有窗格数 = 成员数且全部存活 → 用之并回写映射
+    // 2) 现有窗格数 = cli 成员数且全部存活 → 用之并回写映射
     const listed = tmux(["list-panes", "-t", name, "-F", "#{pane_id}"]).trim().split("\n").filter(Boolean);
-    if (listed.length === config.members.length && listed.every((id) => paneAlive(id))) {
+    if (listed.length === cliCount && listed.every((id) => paneAlive(id))) {
       config.paneIds = {};
-      config.members.forEach((m, i) => {
+      config.members.filter((m) => m.type !== "krystal").forEach((m, i) => {
         config.paneIds![m.id] = listed[i]!;
       });
+      config.members.filter((m) => m.type === "krystal").forEach((m) => {
+        config.paneIds![m.id] = "";
+      });
       saveTeamConfig(config);
-      return listed;
+      return aligned();
     }
     // 3) 窗格缺失/死亡 → 整体重建（成员各自用 resume 命令拉起）
     killSession(name);

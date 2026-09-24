@@ -89,15 +89,18 @@ export class AgentCell {
   readonly root: VStack;
   private top: CellTop;
   private tail: Tail;
+  private native?: Component;
   readonly scrollView: ScrollView;
   private lines: string[] = [];
   private log: string[] = [];   // 已滚出屏幕的历史行（连续流水）
   private last: string[] = [];  // 最近一次画面
 
-  constructor(member: Member) {
+  constructor(member: Member, native?: Component) {
     this.top = new CellTop(member);
     this.tail = new Tail();
-    this.scrollView = new ScrollView(this.tail, {
+    this.native = native;
+    // krystal 成员：格子直接渲染原生组件（ToolBlock/思考/Markdown），不喂抓屏帧
+    this.scrollView = new ScrollView(native ?? this.tail, {
       follow: "end",
       scrollbar: "auto",
       // 关键：chain 会把滚到头的剩余量传给 primary（第一格）→ 表现为「滚一个，别的也动」
@@ -149,11 +152,13 @@ export class AgentCell {
 
   /** 预载历史（启动时抓窗格 tmux 滚动历史），让空态成员也有可回看内容 */
   seedLog(lines: string[]): void {
+    if (this.native) return;
     const seed = AgentCell.normalize(lines);
     if (seed.length) this.log = seed.slice(0, MAX_LOG_LINES);
   }
 
   setScreen(lines: string[], alive: boolean, active: boolean): void {
+    if (this.native) return; // 原生成员：抓屏帧不适用
     this.lines = lines.slice(-TAIL_KEEP);
     this.top.set(alive, active);
     const frame = AgentCell.normalize(this.lines);

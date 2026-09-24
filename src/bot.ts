@@ -441,13 +441,15 @@ export async function runBotTask(opts: {
   cfg: BuilderConfig;
   cwd: string;
   events: SessionEvent[];
+  /** 团队身份注入（成员使命 + 简报）：拼在 SYSTEM 之后、记忆之前 */
+  identity?: string;
   signal?: AbortSignal;
   onEvent: (e: BotEvent) => void;
 }): Promise<void> {
-  const { cfg, cwd, events, signal, onEvent } = opts;
+  const { cfg, cwd, events, signal, onEvent, identity } = opts;
   // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
   const mem = memoryBlock();
-  const system = SYSTEM(cwd) + (mem ? `\n\n${mem}` : "");
+  const system = SYSTEM(cwd) + (identity ? `\n\n${identity}` : "") + (mem ? `\n\n${mem}` : "");
   const tools = TOOLS;
   const win = contextWindow(cfg.model) ?? assumedWindow; // 窗口未知 → 128k 保守假设（报错学习会自动纠准）
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));

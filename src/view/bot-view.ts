@@ -59,7 +59,7 @@ const rule = (w: number, color = "36") => fg(color, "─".repeat(Math.max(0, w -
 type Line = string;
 
 /** 与 pi 一致：回答用 Markdown 渲染（pi-tui 自带组件） */
-const BOT_THEME: MarkdownTheme = {
+export const BOT_THEME: MarkdownTheme = {
   heading: (t) => bold(fg("36", t)),
   link: (t) => fg("34", t),
   linkUrl: (t) => dim(t),

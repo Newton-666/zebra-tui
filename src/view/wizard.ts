@@ -58,6 +58,7 @@ const TYPE_ITEMS: { value: MemberType; label: string; description: string }[] = 
   { value: "hermes", label: "hermes", description: "hermes agent (chat)" },
   { value: "codex", label: "codex", description: "openai codex cli" },
   { value: "kimi", label: "kimi", description: "kimi code cli" },
+  { value: "krystal", label: "krystal", description: "Krystal 原生成员（进程内，无需 CLI）" },
   { value: "custom", label: "custom", description: "自定义启动命令" },
 ];
 
@@ -623,6 +624,13 @@ class Wizard implements Component, Focusable {
     list.onSelect = this.safe((item: { value: string }) => {
       const type = item.value as MemberType;
       this.members[i]!.type = type;
+      if (type === "krystal") {
+        // 原生成员：无 tmux 命令、模型跟随平台（/model 可换），直接填身份
+        this.members[i]!.command = "";
+        this.members[i]!.color = MEMBER_COLORS.krystal;
+        this.showIdentity(i);
+        return;
+      }
       if (type === "custom") {
         this.showCmd(i);
         return;

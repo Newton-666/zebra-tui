@@ -506,6 +506,7 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
 | 18 | 模型窗口一律动态获取（/models 上报 → 超限报错学习 → 人手改 windows.json），删除内置模型表 | **是** |
 | 19 | 独立 Krystal Bot 恒为完全访问（约束 = 黑名单+围栏+防误删），删除 /mode 与只读档，prompt 无残留 | **是** |
 | 20 | 黑名单只拦**不可逆**（含 force push/删远端分支）与**隐私**（凭据/.env/env 导出）；git push、gh、kill <pid> 放行 | **是** |
+| 21 | Krystal 进驾驶舱：双列（左原生渲染/右投屏）、统一输入双路（krystal 输入线 + 投屏成员照常收）、双入口互不干预（solo bot 独立）、允许多 krystal；向导建队可选 krystal；协调工具（roster/peek/assign）下一轮 | **是** |
 
 ## 13. 简洁性约束：不复杂化，以缓存命中率为判据
 

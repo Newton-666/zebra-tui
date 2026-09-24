@@ -15,6 +15,8 @@ import {
   type TUI,
 } from "../deps/pi-tui/dist/index.js";
 import { ensureTeamSession, paneAlive, respawnPane, sendText, syncPaneWidths } from "./agents.ts";
+import { KrystalMember } from "./driver-krystal.ts";
+import { loadBotModel, loadBuilder } from "./builder.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
 import { briefText, ensureKit, identityText, identityUpdateText } from "./kit.ts";
 import { conflicts, renderGraph } from "./memory.ts";
@@ -93,9 +95,33 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   }
   const header = new HeaderBar();
 
+  // --- Krystal 原生成员（进程内驱动）：左格原生渲染，双路输入的第一路
+  const builderCfg = loadBuilder();
+  const krystal = new Map<string, KrystalMember>();
+  for (const m of config.members) {
+    if (m.type !== "krystal") continue;
+    const base = builderCfg ?? loadBuilder();
+    const model = m.model ?? loadBotModel() ?? base?.model ?? "";
+    if (!base) {
+      appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `${m.name}（krystal）缺平台模型配置——先 /login 或首页配置，再重建团队` });
+      continue;
+    }
+    const km = new KrystalMember({
+      member: m,
+      config: { ...base, model },
+      cwd: config.cwd,
+      identity: identityText(config, m.id) + "\n\n" + briefText(config, m.id),
+      sessionId: config.memberSessions?.[m.id],
+      onRender: () => tui.requestRender(),
+    });
+    krystal.set(m.id, km);
+    config.memberSessions = { ...(config.memberSessions ?? {}), [m.id]: km.sessionId };
+    saveTeamConfig(config);
+  }
+
   // --- team grid (custom proportional columns + draggable divider)
   const cells = new Map<string, AgentCell>();
-  for (const m of config.members) cells.set(m.id, new AgentCell(m));
+  for (const m of config.members) cells.set(m.id, new AgentCell(m, m.type === "krystal" ? krystal.get(m.id)?.transcript : undefined));
   const teamGrid = new TeamGrid(config.members, cells, config.gridRatios, () => terminal.columns);
   let syncTimer: ReturnType<typeof setTimeout> | undefined;
   teamGrid.onRatioChanged = (ratios) => {
@@ -160,6 +186,11 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   const dispatch = (targets: Member[], text: string) => {
     const sent: string[] = [];
     for (const t of targets) {
+      if (t.type === "krystal") {
+        krystal.get(t.id)?.send(text); // 双路送达：krystal 的输入线
+        sent.push(t.name);
+        continue;
+      }
       const idx = config.members.indexOf(t);
       const paneId = paneIds[idx];
       if (!paneId) continue;
@@ -485,6 +516,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   }
   poller.onChange = () => {
     for (const m of config.members) {
+      if (m.type === "krystal") continue; // 原生成员：事件直驱，无抓屏帧
       const f = poller.feeds.get(m.id)!;
       const active = Date.now() - f.changedAt < 4000 && f.alive;
       cells.get(m.id)!.setScreen(f.lines, f.alive, active);
@@ -509,6 +541,11 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
   const identitySent = new Set<string>(); // 本次运行已注入完整身份的成员（再改职责只发精简更新）
   // 上下文是新的才注入身份：新建团队 / 引擎重建 / 窗格复活；复用活窗格（resume）不重复注入
   const pendingIdentity = new Set<string>(freshTeam || !contextsAlive ? config.members.map((m) => m.id) : []);
+  for (const id of krystal.keys()) {
+    pendingIdentity.delete(id); // 原生成员：身份+简报已随驱动创建注入 SYSTEM
+    briefed.add(id);
+    identitySent.add(id);
+  }
   /** 短身份：每次开局 / 窗格复活后注入（一两句话，省 token） */
   const injectIdentity = (m: Member): boolean => {
     const idx = config.members.indexOf(m);

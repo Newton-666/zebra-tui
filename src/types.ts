@@ -1,6 +1,6 @@
 // zebra — shared types
 
-export type MemberType = "pi" | "hermes" | "codex" | "kimi" | "custom";
+export type MemberType = "pi" | "hermes" | "codex" | "kimi" | "custom" | "krystal";
 
 export interface Member {
   id: string;            // "pi" | "hermes" | ... | "m3"
@@ -20,7 +20,9 @@ export interface TeamConfig {
   cwd: string;           // working dir for agent panes
   tmuxSession: string;   // tmux session name
   members: Member[];
-  paneIds?: Record<string, string>; // memberId -> tmux pane id (persisted)
+  paneIds?: Record<string, string>;
+  /** krystal 原生成员的会话 id（驾驶舱 resume 用） */
+  memberSessions?: Record<string, string>; // memberId -> tmux pane id (persisted)
   gridRatios?: number[];            // 列宽比例（可拖拽分隔线调整）
   briefed?: string[];               // 已注入团队简报的成员 id
   layoutVersion?: number;           // 引擎排布规则版本（不匹配则重建）
@@ -36,6 +38,7 @@ export type HistoryEvent =
   | { t: string; type: "note"; text: string };                      // system notes
 
 export const DEFAULT_COMMANDS: Record<MemberType, { command: string; resume?: string }> = {
+  krystal: { command: "", resume: "" }, // 原生成员：进程内驱动，无 tmux 命令
   pi: { command: "pi", resume: "pi -c || pi" },
   hermes: { command: "hermes chat", resume: "hermes chat --continue || hermes chat" },
   codex: { command: "codex", resume: "codex resume --last || codex" },
@@ -49,6 +52,7 @@ export const MEMBER_COLORS: Record<string, string> = {
   codex: "33",   // yellow
   kimi: "32",    // green
   custom: "34",  // blue
+  krystal: "38;5;45", // platform blue（原生成员）
 };
 
 /** 网格列数：1 人单列；3 人三列（各占满高，避免 2+1 畸形）；其余两列 */
