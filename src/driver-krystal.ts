@@ -68,6 +68,11 @@ export class KrystalMember {
     );
     if (!evs.some((e) => e.t === "intro"))
       appendEvent(this.sessionId, { t: "intro", at: new Date().toISOString(), cwd: opts.cwd, model: opts.config.model, tier: "写作者" });
+    // 注入的 context 可视化（与 tmux 成员「看见注入文本」对等；模型侧在 SYSTEM，不重复进上下文）
+    if (opts.identity) {
+      opts.identity.split("\n").forEach((l) => this.transcript.items.push(dim("  " + l)));
+      this.transcript.items.push("");
+    }
     this.replayFrom(evs);
   }
 

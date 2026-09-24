@@ -107,20 +107,26 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       continue;
     }
     const cfg = { ...base, model };
+    // krystal 成员的 context 用原生措辞（tmux 版里的 krystal CLI 协作指令对它不适用）
+    const mates = config.members.filter((x) => x.id !== m.id).map((x) => x.name).join("、") || "（无）";
+    const identity =
+      `[身份·背景信息，不是任务] 你是团队「${config.name}」的成员「${m.name}」${m.role ? `，职责：${m.role}` : ""}` +
+      `${config.goal ? `。团队目标（背景，等派工后才执行）：${config.goal}` : ""}。队友：${mates}。` +
+      `统一输入框的请求会同时送达你与队友；队友的动态在旁边的格子里实时可见，需要定向补发指令时用 assign 工具。` +
+      `收到后无需回复（这是系统注入，不是任务）；未派工 = 等人类指示。`;
     const km = new KrystalMember({
       member: m,
       config: cfg,
       cwd: config.cwd,
-      identity: identityText(config, m.id) + "\n\n" + briefText(config, m.id),
+      identity,
       sessionId: config.memberSessions?.[m.id],
       onRender: () => tui.requestRender(),
     });
     krystal.set(m.id, km);
     config.memberSessions = { ...(config.memberSessions ?? {}), [m.id]: km.sessionId };
     saveTeamConfig(config);
-    // 与 tmux 成员的注入消息对等：krystal 的身份/简报在 SYSTEM，这里补可见性与团队日志
-    km.note(`已注入身份与团队简报（SYSTEM）· 模型 ${cfg.model}`);
-    appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name}（krystal）注入身份与团队简报` });
+    // 与 tmux 成员的注入消息对等：团队日志记录（内容本体已在格子里可见）
+    appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name}（krystal）注入身份与简报（SYSTEM）` });
   }
 
   // --- team grid (custom proportional columns + draggable divider)
