@@ -54,12 +54,20 @@ function append(line: Line): void {
   }
 }
 
-/** 读全部事实（版本流折叠；被取代的标记保留、默认不参与注入） */
+/** 读全部事实（版本流折叠；被取代的标记保留、默认不参与注入）。
+ *  进程内缓存 + mtime:size 签名失效——append-only 文件任何写入（append 追加）都会同时变mtime与size，签名必变，无需手动失效。 */
+let cache: { key: string; facts: Fact[] } | undefined;
+
 export function loadFacts(): Fact[] {
   let raw = "";
+  let key = "";
   try {
+    const st = fs.statSync(FACTS);
+    key = `${st.mtimeMs}:${st.size}`;
+    if (cache && cache.key === key) return cache.facts;
     raw = fs.readFileSync(FACTS, "utf8");
   } catch {
+    cache = undefined;
     return [];
   }
   const byId = new Map<string, Fact>();
@@ -82,7 +90,8 @@ export function loadFacts(): Fact[] {
       superseded.add(e.id);
     }
   }
-  return [...byId.values()];
+  cache = { key, facts: [...byId.values()] };
+  return cache.facts;
 }
 
 export const activeFacts = (facts: Fact[]): Fact[] => facts.filter((f) => !f.supersededBy);
@@ -137,8 +146,18 @@ export function adjustTrust(id: string, delta: number): Fact | undefined {
   return { ...f, trust };
 }
 
+/** 提取练习：命中即计数（提取效应）。批量一次读库、N 条一次落盘；批后失效缓存并同步镜像 */
 export function markUsed(ids: string[]): void {
-  for (const id of ids) append({ t: "fact_update", id, patch: { used: (loadFacts().find((f) => f.id === id)?.used ?? 0) + 1 } });
+  if (!ids.length) return;
+  const uniq = [...new Set(ids)];
+  const byId = new Map(loadFacts().map((f) => [f.id, f]));
+  for (const id of uniq) {
+    const f = byId.get(id);
+    if (!f) continue;
+    append({ t: "fact_update", id, patch: { used: f.used + 1 } });
+  }
+  cache = undefined; // append 已使文件签名变化，但进程内缓存里的 used 是旧值——显式失效最稳
+  writeMirror(); // 修复历史失步：used 变更也要同步人可读镜像
 }
 
 // ---------- 五个确定性查询（grep 式，无向量库） ----------
@@ -184,12 +203,13 @@ export const about = (entity: string, limit = 8, scope?: string): Fact[] =>
     .slice(0, limit);
 
 /** 一跳邻居：与「关于 entity 的事实」共享其他实体的事实 */
-export function related(entity: string, limit = 8): Fact[] {
+export function related(entity: string, limit = 8, scope?: string): Fact[] {
   const base = about(entity, 8, scope);
+  const baseIds = new Set(base.map((f) => f.id));
   const shared = new Set(base.flatMap((f) => f.entities.map((e) => e.toLowerCase())).filter((e) => !e.includes(entity.toLowerCase())));
   return activeFacts(loadFacts())
     .filter((f) => !scope || f.scope === scope)
-    .filter((f) => !base.includes(f) && f.entities.some((e) => shared.has(e.toLowerCase())))
+    .filter((f) => !baseIds.has(f.id) && f.entities.some((e) => shared.has(e.toLowerCase())))
     .slice(0, limit);
 }
 
