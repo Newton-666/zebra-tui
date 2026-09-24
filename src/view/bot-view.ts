@@ -21,7 +21,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
-import { activeFacts, globalFactCount, importMirror, loadFacts, renderGraph, sleepMemories, type SleepMarks } from "../memory.ts";
+import { activeFacts, importMirror, loadFacts, renderGraph, sleepMemories, type SleepMarks } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
@@ -425,6 +425,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     prevHistory = JSON.parse(JSON.stringify(history)) as unknown[];
   };
   let busy = false;
+  let sleeping = false; // /sleep 进行中（活行：圆点闪烁 + sleeping 扫光）
   let state = cfg ? "空闲" : "未配置";
   let turnThinking = ""; // 本回合累积的思考原文（落盘 + /resume 重放）
   let tokens = 0;
@@ -850,7 +851,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     invalidate(): void {},
   };
   const workingTimer = setInterval(() => {
-    if (busy) {
+    if (busy || sleeping) {
       workingTick++;
       toolBlink = Math.floor(workingTick / 4) % 2 === 1;
       tui.requestRender();
@@ -1088,9 +1089,27 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           refresh();
           return;
         }
-        push(dim(`  睡眠整理中…（全局活跃事实 ${globalFactCount()} 条；模型出策展方案，内核逐条执行 append-only 事件）`), "");
+        if (sleeping) {
+          push(dim("  睡眠整理进行中…"), "");
+          refresh();
+          return;
+        }
+        // 活行：与工具调用同型 —— 圆点闪烁 + sleeping 扫光，完成后原地换成蓝点 + diff + 新记忆图
+        sleeping = true;
+        const live: Component = {
+          render(wid: number): string[] {
+            const dot = Math.floor(workingTick / 4) % 2 === 0 ? fg("38;5;117", "●") : dim("○");
+            return [truncateToWidth(`  ${dim("╰─")} ${dot} ${sweep("sleeping", workingTick)}`, wid, "")];
+          },
+          invalidate(): void {},
+        };
+        push(live, "");
         refresh();
         void sleepMemories(cfg).then((r) => {
+          sleeping = false;
+          const idx = transcript.items.indexOf(live);
+          if (idx >= 0) transcript.items.splice(idx, 1);
+          transcript.forget(live);
           if (!r) {
             push(dim("  睡眠整理跳过（库空/进行中）或失败——详见 ~/.krystal/"), "");
             refresh();
