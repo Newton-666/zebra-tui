@@ -136,64 +136,98 @@ export class UserBlock implements Component {
   invalidate(): void {}
 }
 
-/** 工具调用块：与 pi 同源（tool-execution.js）——Box(padX=1, padY=1, toolXxxBg)
- *  状态色整页宽背景 + 加粗工具名 + dim 输出 + 截断提示；块内只用 bold/dim（\x1b[22m 还原）以免清掉底色 */
-// 色板：成功 = 纯绿再深一档（48;5;22 #005F00，同色相去灰；owner 选定）；执行中 = 灰蓝(60)；拦下/出错 = 灰玫(95)
-const TOOL_BG: Record<string, string> = { pending: "48;5;60", ok: "48;5;22", denied: "48;5;95", error: "48;5;95" };
-const TOOL_MARK: Record<string, string> = { pending: "38;5;223", ok: "38;5;231", denied: "38;5;231", error: "38;5;231" };
-// 块内文字用实色（dim 在彩底上会发灰）：标题加粗白、参数浅青白、输出浅灰、提示中灰
-const T_TITLE = "\x1b[38;5;231m";
-const T_ARGS = "\x1b[38;5;195m";
-const T_OUT = "\x1b[38;5;252m";
-const T_HINT = "\x1b[38;5;246m";
-const B_ON = "\x1b[1m";
-const B_OFF = "\x1b[22m";
+// ── 工具调用 · 圆点样式（水晶语言）：点管状态，一行管信息，diff 是唯一展开的内容
+//    pending：●↔○ 冰蓝闪烁（600ms 相位，工作计时器驱动）· ok：蓝点 · denied/error：玫点
+//    展开：仅 edit_file 出 diff（旧行玫、新行绿，全 dim，上限 6 行）；write_file 给 +N 行；
+//    run_command 给前 2 行输出；read_file/list_dir 只有一行（内容本来就在编辑器里）
+const DOT_PEND = "38;5;117";
+const DOT_ROSE = "38;5;218";
+const DIFF_ADD = "38;5;71";
+const DIFF_DEL = "38;5;218";
+let toolBlink = false; // 由工作计时器翻转（每 4 tick = 600ms）
+
 export class ToolBlock implements Component {
   name: string;
   /** 渲染版本号：内容变化时 +1（Transcript 缓存据此只重算这一项） */
   rev = 0;
-  private _args: string;
+  private summary: string;
   private state = "pending";
-  private output: string[] = [];
+  private parsed: Record<string, unknown> | undefined;
+  private detail: { kind: "out" | "del" | "add"; text: string }[] = [];
   private note = "";
+
   constructor(name: string, args: string) {
     this.name = name;
-    let preview = args;
-    try {
-      preview = JSON.stringify(JSON.parse(args));
-    } catch {
-      /* 原样 */
-    }
-    this._args = preview.slice(0, 90);
+    this.args = args;
   }
+
   get args(): string {
-    return this._args;
+    return this.summary;
   }
-  set args(v: string) {
-    this._args = v;
+  /** 传入原始 args JSON：重新提取摘要（修正流式半截 JSON）+ 重算 diff 源数据 */
+  set args(raw: string) {
+    try {
+      this.parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      /* 流式半截：沿用旧 parsed，摘要回退原文 */
+    }
+    const p = this.parsed;
+    const str = (k: string) => String(p?.[k] ?? "");
+    if (p) {
+      if (this.name === "run_command") this.summary = str("command").slice(0, 56) || "…";
+      else if (this.name === "memory") this.summary = str("op") + (p.query ? ` · ${str("query").slice(0, 20)}` : "");
+      else this.summary = str("path") || str("command").slice(0, 40) || str("raw").slice(0, 40) || "…";
+    } else if (!this.summary) {
+      this.summary = raw.replace(/^[{"\s]+|[}"\s]+$/g, "").slice(0, 48) || "…";
+    }
     this.rev++;
   }
+
   setResult(ok: boolean, denied: boolean, output: string): void {
     this.state = denied ? "denied" : ok ? "ok" : "error";
     const lines = output.split("\n").filter((l) => l.trim() !== "");
-    this.output = lines.slice(0, 6).map((l) => l.slice(0, 160));
-    this.note = lines.length > 6 ? `… +${lines.length - 6} 行` : "";
+    if (denied) {
+      this.summary += " · 被闸门拦截";
+      this.detail = lines.slice(0, 2).map((l) => ({ kind: "out" as const, text: l }));
+    } else if (this.name === "read_file") {
+      this.summary += ` · ${lines.filter((l) => !l.startsWith("…(")).length} 行`;
+    } else if (this.name === "list_dir") {
+      this.summary += ` · ${lines.length} 项`;
+    } else if (this.name === "run_command") {
+      this.detail = lines.slice(0, 2).map((l) => ({ kind: "out" as const, text: l }));
+      if (lines.length > 2) this.note = `… +${lines.length - 2} 行`;
+    } else if (this.name === "edit_file") {
+      const oldL = String(this.parsed?.oldText ?? "").split("\n").filter((l) => l !== "");
+      const newL = String(this.parsed?.newText ?? "").split("\n").filter((l) => l !== "");
+      let s = 0;
+      while (s < oldL.length && s < newL.length && oldL[s] === newL[s]) s++;
+      let eo = oldL.length, en = newL.length;
+      while (eo > s && en > s && oldL[eo - 1] === newL[en - 1]) { eo--; en--; }
+      const dels = oldL.slice(s, eo), adds = newL.slice(s, en);
+      this.summary += ` · ${fg(DIFF_ADD, `+${adds.length}`)} ${fg(DIFF_DEL, `−${dels.length}`)}`;
+      this.detail = [...dels.map((t) => ({ kind: "del" as const, text: t })), ...adds.map((t) => ({ kind: "add" as const, text: t }))].slice(0, 6);
+      if (dels.length + adds.length > 6) this.note = `… +${adds.length} −${dels.length} 行（完整 diff 在会话文件里）`;
+    } else if (this.name === "write_file") {
+      this.summary += ` · +${String(this.parsed?.content ?? "").split("\n").length} 行`;
+    } else {
+      this.summary += lines[0] ? ` · ${lines[0].slice(0, 40)}` : "";
+    }
     this.rev++;
   }
+
   render(w: number): string[] {
-    const inner = Math.max(12, w - 4);
-    const bar = (body = "") => {
-      const padTo = Math.max(0, inner - visibleWidth(body));
-      return chip(" " + body + " ".repeat(padTo) + ZWSP, TOOL_BG[this.state]!, FG_WHITE);
-    };
-    const mark = this.state === "pending" ? "●" : this.state === "ok" ? "✓" : "✗ 闸门拒绝";
-    const markColored = `\x1b[${TOOL_MARK[this.state]!}m${mark}`;
-    const head = `${markColored} ${T_TITLE}${B_ON}${this.name}${B_OFF} ${T_ARGS}${this.args}`;
-    const rows = [bar(), bar(head)];
-    for (const l of this.output) rows.push(bar(T_OUT + "  " + l));
-    if (this.note) rows.push(bar(T_HINT + "  " + this.note));
-    rows.push(bar());
-    return rows;
+    const dot =
+      this.state === "pending"
+        ? toolBlink ? dim("○") : fg(DOT_PEND, "●")
+        : this.state === "denied" || this.state === "error"
+          ? fg(DOT_ROSE, "●")
+          : fg(BLUE, "●");
+    const head = `  ${dot} ${bold(this.name)} ${dim(this.summary)}`;
+    const body = this.detail.map((d) =>
+      "    " + (d.kind === "del" ? fg(DIFF_DEL, dim("− " + d.text)) : d.kind === "add" ? fg(DIFF_ADD, dim("+ " + d.text)) : dim("  " + d.text)),
+    );
+    if (this.note) body.push("    " + dim(this.note));
+    return [head, ...body].map((l) => truncateToWidth(l, w, ""));
   }
   invalidate(): void {}
 }
@@ -811,6 +845,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   const workingTimer = setInterval(() => {
     if (busy) {
       workingTick++;
+      toolBlink = Math.floor(workingTick / 4) % 2 === 1;
       tui.requestRender();
     }
   }, 150);
@@ -881,7 +916,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           currentTool = new ToolBlock(e.name, e.argsSoFar);
           push(currentTool);
         } else {
-          currentTool.args = new ToolBlock(e.name, e.argsSoFar).args;
+          currentTool.args = e.argsSoFar;
         }
         tokens += e.argsSoFar.length / 40;
         refresh();
@@ -895,7 +930,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           currentTool = new ToolBlock(e.name, e.args);
           push(currentTool);
         } else {
-          currentTool.args = new ToolBlock(e.name, e.args).args;
+          currentTool.args = e.args;
         }
         break;
       }
