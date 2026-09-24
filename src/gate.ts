@@ -1,35 +1,19 @@
-// Krystal — 终端闸门（三层策略）
-// 设计：docs/agent-spec.md §2.1（三层强制）＋ owner 的 /mode 需求：
-//   readonly：只有白名单通过（默认）
-//   full    ：白/灰名单直通 · 名单外的非破坏命令也放行（工作档要真能干活）· 黑名单自动拦截
-// 注意（诚实说明）：full 模式下终端 = 任意代码执行能力，黑名单是**防误操作的安全网**，
-//   不是安全沙箱。真正的强制层是 OS 沙箱 / 工作副本（§2.1 第三层，尚未实现）。
+// Krystal — 终端闸门（恒定完全访问；spec §12.4 #19：独立 Bot 不再有档位）
+// 约束就三条，全部是**防误操作的安全网**，不是安全沙箱（真正的强制层 = OS 沙箱/工作副本，§2.1 第三层）：
+//   ① 黑名单：删除类 / 提权 / git push / 磁盘与系统级 —— 不可逆与越权，一律拦
+//   ② 路径围栏：不许碰工作目录之外
+//   ③ 防误删：不许用重定向截断已存在的文件
 import fs from "node:fs";
 import path from "node:path";
 
-export type Mode = "readonly" | "full";
-export type List = "white" | "gray" | "black" | "fence";
+export type List = "black" | "fence";
 export interface Decision {
   allow: boolean;
   list?: List;
   reason?: string;
 }
 
-/** 白名单：任何模式都通过（只读 + 无副作用） */
-const WHITE_FIRST = new Set([
-  "pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "which", "stat", "file",
-  "basename", "dirname", "realpath", "du", "df", "tree", "jq", "sort", "uniq", "cut", "tr", "diff",
-  "echo", "printf", "date", "whoami", "uname", "node", "python3", "npm", "git",
-]);
-const GIT_WHITE = new Set(["status", "log", "diff", "show", "branch", "ls-files", "remote", "describe", "rev-parse"]);
-/** 灰名单：full 模式放行（写/建/改，但不删除）；readonly 拦截 */
-const GRAY_FIRST = new Set(["mkdir", "touch", "cp", "mv", "tee", "ln", "sed", "awk", "chmod", "npm", "npx", "pnpm", "yarn", "make", "pytest", "cargo", "go", "tsc", "eslint", "prettier", "python3", "node", "pip", "pip3", "uv", "ruff", "black", "bun", "deno", "cmake", "gradle", "mvn", "dotnet", "tar", "unzip", "zip", "perl"]);
-const GIT_GRAY = new Set(["add", "commit", "stash", "switch", "checkout", "restore", "init", "tag", "merge", "rebase", "revert", "cherry-pick"]);
-/** gh 的只读子命令（第 2、3 段都须落在只读词表内） */
-const GH_GROUPS = new Set(["pr", "issue", "repo", "run", "release", "label", "gist", "workflow"]);
-const GH_READ_VERBS = new Set(["view", "list", "status", "checks", "search", "diff"]);
-
-/** 黑名单：**两种模式都拦**（不可逆 / 越权 / 系统级） */
+/** 黑名单：不可逆 / 越权 / 系统级，一律拦 */
 const BLACK: { re: RegExp; why: string }[] = [
   { re: /(^|[\s;|&])(rm|rmdir|unlink|shred)(\s|$)/, why: "删除类命令（rm/rmdir/unlink/shred）" },
   { re: /git\s+clean/, why: "git clean（会删未跟踪文件）" },
@@ -46,10 +30,6 @@ const BLACK: { re: RegExp; why: string }[] = [
   { re: /(^|[\s;|&])defaults\s+write/, why: "改系统偏好" },
   { re: />\s*\/dev\/(sd|disk|rdisk)/, why: "写裸设备" },
 ];
-
-const shellMeta = (cmd: string) => /[;&|`$><]/.test(cmd);
-const first = (cmd: string) => cmd.trim().split(/\s+/)[0] ?? "";
-const gitSub = (cmd: string) => (first(cmd) === "git" ? cmd.trim().split(/\s+/)[1] ?? "" : "");
 
 /** 重定向目标（`> file` / `>> file`）；用于「不许截断已存在文件」的判定 */
 export function redirectTargets(cmd: string): { path: string; append: boolean }[] {
@@ -71,60 +51,27 @@ export function outsideCwd(cmd: string, cwd: string): string | undefined {
   return undefined;
 }
 
-const needsWrite = (cmd: string) => {
-  const f = first(cmd);
-  if (GRAY_FIRST.has(f)) return true;
-  if (f === "git" && GIT_GRAY.has(gitSub(cmd))) return true;
-  if (redirectTargets(cmd).length) return true;
-  return false;
-};
-
 /**
- * 闸门决策。返回值带 list（白/灰/黑/围栏），界面据此显示被哪一层拦下。
+ * 闸门决策：黑名单 → 路径围栏 → 防误删（重定向不许截断已存在文件）→ 放行。
  * @param exists 注入的路径存在性检查（便于测试与精确判断「是否误删」）
  */
-export function decide(cmd: string, mode: Mode, cwd: string, exists: (p: string) => boolean = (p) => fs.existsSync(p)): Decision {
+export function decide(cmd: string, cwd: string, exists: (p: string) => boolean = (p) => fs.existsSync(p)): Decision {
   const c = cmd.trim();
   if (!c) return { allow: false, list: "fence", reason: "空命令" };
 
-  // ① 黑名单：任何模式都拦
+  // ① 黑名单：一律拦
   for (const b of BLACK) if (b.re.test(c)) return { allow: false, list: "black", reason: `黑名单拦截：${b.why}` };
 
   // ② 路径围栏：不许碰工作目录之外
   const out = outsideCwd(c, cwd);
   if (out) return { allow: false, list: "fence", reason: `越出工作目录（${out}）` };
 
-  // ③ 白名单（只读）
-  if (!needsWrite(c)) {
-    const f = first(c);
-    const parts = c.split(/\s+/);
-    const ok =
-      f === "git"
-        ? GIT_WHITE.has(gitSub(c)) || gitSub(c) === ""
-        : f === "gh"
-          ? (parts[1] === "auth" && parts[2] === "status") || (GH_GROUPS.has(parts[1] ?? "") && GH_READ_VERBS.has(parts[2] ?? ""))
-          : WHITE_FIRST.has(f);
-    if (ok) {
-      // 白名单里的组合命令（如 `grep x | head`）在 full 下放行，只读模式下仍拦（避免误用重定向/管道改文件）
-      if (shellMeta(c) && mode === "readonly") return { allow: false, list: "gray", reason: "只读模式：不接受管道/重定向（/mode full 可放行）" };
-      return { allow: true, list: "white" };
-    }
-  }
-
-  // ④ 只读模式：灰名单一律拦
-  if (mode === "readonly") return { allow: false, list: "gray", reason: "只读模式：写类命令需 /mode full" };
-
-  // ⑤ full 模式：灰名单放行，但「不误删」——不许覆盖/截断已存在的数据
+  // ③ 防误删：不许覆盖/截断已存在的数据
   for (const r of redirectTargets(c)) {
     if (!r.append) {
       const abs = path.resolve(cwd, r.path);
       if (exists(abs)) return { allow: false, list: "black", reason: `拒绝截断已存在文件（${r.path}）：用 >> 追加，或先确认` };
     }
   }
-  // 名单外：full 模式放行（黑名单/围栏已是硬边界；full 档本就是任意执行能力 + 防误删安全网）
-  return { allow: true, list: "gray" };
+  return { allow: true, list: "fence" };
 }
-
-export const modeLabel = (m: Mode) => (m === "full" ? "完全访问" : "只读");
-/** 兼容旧调用（只读模式判定） */
-export const commandAllowed = (cmd: string): boolean => decide(cmd, "readonly", process.cwd()).allow;

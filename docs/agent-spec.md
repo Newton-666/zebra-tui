@@ -504,6 +504,7 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
 | 16 | 记忆持续更新：同主实体注入只保留最新认知（旧条 recall 可回）＋ remember 回显「相关旧知」引导 supersede | **是** |
 | 17 | 记忆形成事件驱动：agent 在工作中主动沉淀（常驻系统提示指令，收尾前先沉淀）；框架不做静默自动抽取 | **是** |
 | 18 | 模型窗口一律动态获取（/models 上报 → 超限报错学习 → 人手改 windows.json），删除内置模型表 | **是** |
+| 19 | 独立 Krystal Bot 恒为完全访问（约束 = 黑名单+围栏+防误删），删除 /mode 与只读档，prompt 无残留 | **是** |
 
 ## 13. 简洁性约束：不复杂化，以缓存命中率为判据
 
@@ -601,15 +602,15 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
    有 tool_calls ？── 否 ──→ final：Markdown 块 ◇落盘 → 回合结束      │
         │ 是                                                        │
         ▼                                                           │
- ④  档位闸门（硬强制，模型说什么不算）                               │
-      命令闸门（只读档白名单·未列入=拒绝；full 档黑名单+围栏）         │
+ ④  终端闸门（硬强制，模型说什么不算）                               │
+      黑名单（删除/提权/push）+ 路径围栏 + 防误删                      │
         │                                                           │
         │ 拒绝 ──→ 回填「[策略闸门拒绝] …」──────────────┐           │
         ▼ 允许                                          │           │
  ⑤  工具执行                                            │           │
       list_dir ≤200 项 · read_file ≤256KB 分段        │           │
       run_command ≤16k 字符 / 120s 超时                │           │
-      write_file / edit_file（full 档授予）             │           │
+      write_file / edit_file（恒定装备）                │           │
         │ 输出截断                                       │           │
         └────── 回填 role:"tool" ────────────────────────┘           │
                         │                                            │
@@ -673,7 +674,7 @@ session 结束自动 extract（hermes 默认也关）/ SQLite（**等库到千�
 | ① 输入 | `view/bot-view.ts`（Editor） | ✓ |
 | ② 装配 | `bot.ts`（`SYSTEM()` + history）+ `session.ts`（重放） | ✓ / ◇ |
 | ③ 模型调用 · 流 | `bot.ts streamChat` | ✓ / usage ◇ |
-| ④ 档位闸门 | `bot.ts commandAllowed` / `inside()` | ✓ |
+| ④ 终端闸门 | `gate.ts decide`（黑名单+围栏+防误删） | ✓ |
 | ⑤ 工具执行 | `bot.ts executeTool` | ✓ |
 | 渲染 | `view/bot-view.ts`（StreamText / ToolBlock / UserBlock / Markdown + `refresh()`） | ✓ |
 | 会话落盘 | `session.ts`（events.jsonl，只增） | ◇ |

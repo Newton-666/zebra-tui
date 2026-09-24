@@ -1,13 +1,13 @@
-// Krystal Bot — 原生 agent 核心（与 pi 同构）：SSE 流式 + 工具调用 + 档位闸门
+// Krystal Bot — 原生 agent 核心（与 pi 同构）：SSE 流式 + 工具调用 + 终端闸门
 // 设计：docs/agent-spec.md §9。渲染由 bot-view 负责（cell 即它的 TUI）。
-// 档位：原型阶段实现「阅读者」（只读）——三层强制之第一层（命令白名单，未列入 = 拒绝）。
+// 终端恒定完全访问（spec §12.4 #19）：约束 = 黑名单 + 路径围栏 + 防误删（gate.ts），没有档位。
 import { exec } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
-import { decide, modeLabel, type Mode } from "./gate.ts";
+import { decide } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
 import { about, addFact, adjustTrust, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts, supersedeFact } from "./memory.ts";
 import { assumedWindow, learnFromErrorMessage } from "./windows.ts";
@@ -68,7 +68,7 @@ export const READER_TOOLS: BotTool[] = [
   {
     name: "run_command",
     description:
-      "跑一条终端命令。只读模式：仅白名单（pwd/ls/cat/head/tail/grep/rg/find/wc/which/stat/tree/jq 等 + git status/log/diff/show/branch），不接受管道/重定向。完全访问模式：白/灰名单直通（建改文件、构建测试、git add·commit 等），名单外的非破坏命令也放行；仅删除类（rm）、提权（sudo）、git push、磁盘/系统级命令被黑名单拦截",
+      "跑一条终端命令（管道/重定向可用）。构建、测试、git add·commit、名单外的非破坏命令都放行；仅删除类（rm）、提权（sudo）、git push、磁盘/系统级命令被安全网拦截",
     parameters: {
       type: "object",
       properties: { command: { type: "string", description: "命令行" } },
@@ -77,11 +77,11 @@ export const READER_TOOLS: BotTool[] = [
   },
 ];
 
-/** 写装备（§9.2 档位授予）：只有完全访问档才发给模型 */
+/** 写装备：与读装备一起常驻（终端恒定完全访问） */
 const WRITER_TOOLS: BotTool[] = [
   {
     name: "write_file",
-    description: "整文件写入（覆盖；自动建父目录）。仅完全访问模式（/mode full）可用，限工作目录内",
+    description: "整文件写入（覆盖；自动建父目录），限工作目录内",
     parameters: {
       type: "object",
       properties: {
@@ -93,7 +93,7 @@ const WRITER_TOOLS: BotTool[] = [
   },
   {
     name: "edit_file",
-    description: "精确替换文件片段（oldText 须与文件内容逐字节一致且唯一；多处命中时补上下文，或 replace_all=true）。仅完全访问模式可用",
+    description: "精确替换文件片段（oldText 须与文件内容逐字节一致且唯一；多处命中时补上下文，或 replace_all=true）",
     parameters: {
       type: "object",
       properties: {
@@ -107,11 +107,10 @@ const WRITER_TOOLS: BotTool[] = [
   },
 ];
 
-/** 装备按档位授予（§9.2：同一个 agent，穿不同装备） */
-export const TOOLS_FOR = (mode: Mode): BotTool[] =>
-  mode === "full" ? [...READER_TOOLS, ...WRITER_TOOLS] : READER_TOOLS;
+/** 全量装备：终端恒定完全访问，读写工具常驻（§12.4 #19） */
+const TOOLS: BotTool[] = [...READER_TOOLS, ...WRITER_TOOLS];
 
-// ---------- 档位闸门（§2.1 第一层：白名单，未列入 = 拒绝） ----------
+// ---------- 终端闸门（黑名单 + 围栏 + 防误删，见 gate.ts） ----------
 
 const READONLY_FIRST = new Set(["pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "which"]);
 const GIT_READONLY_SUB = new Set(["status", "log", "diff", "show", "branch"]);
@@ -152,7 +151,7 @@ export interface ToolResult {
   output: string;
 }
 
-export async function executeTool(name: string, rawArgs: string, cwd: string, mode: Mode = "readonly"): Promise<ToolResult> {
+export async function executeTool(name: string, rawArgs: string, cwd: string): Promise<ToolResult> {
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(rawArgs || "{}") as Record<string, unknown>;
@@ -164,7 +163,7 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
   try {
     if (name === "list_dir") {
       const dir = rel(args.path, ".");
-      if (!inside(dir)) return { ok: false, denied: true, output: "越出工作目录（档位：阅读者）" };
+      if (!inside(dir)) return { ok: false, denied: true, output: "越出工作目录" };
       const entries = await fs.promises.readdir(dir, { withFileTypes: true });
       const lines = entries.slice(0, 200).map((e) => (e.isDirectory() ? "d " : "- ") + e.name);
       return { ok: true, output: lines.join("\n") || "（空目录）" };
@@ -183,7 +182,7 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
         const limit = Math.max(1, Math.floor(Number(args.limit ?? 2000) || 2000));
         const slice = allLines.slice(offset - 1, offset - 1 + limit);
         const notes: string[] = [];
-        if (bytesRead === CAP) notes.push("…（截断，只读前 256KB）");
+        if (bytesRead === CAP) notes.push("…（截断，只显示前 256KB）");
         else if (offset - 1 + slice.length < allLines.length)
           notes.push(`…（第 ${offset + slice.length - 1} 行之后未显示，可用 offset=${offset + slice.length} 续读）`);
         return { ok: true, output: slice.join("\n") + (notes.length ? "\n" + notes.join(" ") : "") };
@@ -192,7 +191,6 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
       }
     }
     if (name === "write_file") {
-      if (mode === "readonly") return { ok: false, denied: true, output: "只读模式：写文件需 /mode full" };
       const file = rel(args.path, "");
       if (!inside(file)) return { ok: false, denied: true, output: "越出工作目录" };
       const content = String(args.content ?? "");
@@ -201,7 +199,6 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
       return { ok: true, output: `已写入 ${path.relative(cwd, file) || "."}（${content.split("\n").length} 行 / ${Buffer.byteLength(content)} 字节）` };
     }
     if (name === "edit_file") {
-      if (mode === "readonly") return { ok: false, denied: true, output: "只读模式：改文件需 /mode full" };
       const file = rel(args.path, "");
       if (!inside(file)) return { ok: false, denied: true, output: "越出工作目录" };
       const oldText = String(args.oldText ?? "");
@@ -222,7 +219,7 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
       return { ok: true, output: `已编辑 ${path.relative(cwd, file) || "."}（替换 ${args.replace_all ? count : 1} 处）` };
     }
     if (name === "memory") {
-      // 记忆是平台原语（不是文件系统操作）→ 不受只读档位限制；写入的是记忆库，不是仓库
+      // 记忆是平台原语（写入的是记忆库，不是仓库）
       const op = String(args.op ?? "");
       const str = (v: unknown) => String(v ?? "").trim();
       const arr = (v: unknown) => (Array.isArray(v) ? v.map((x) => str(x)).filter(Boolean) : []);
@@ -275,7 +272,7 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
     }
     if (name === "run_command") {
       const cmd = String(args.command ?? "");
-      const d = decide(cmd, mode, cwd);
+      const d = decide(cmd, cwd);
       if (!d.allow) return { ok: false, denied: true, output: `策略闸门拒绝［${d.list}］${d.reason ?? ""}：${cmd.slice(0, 80)}` };
       const r = await execAsync(cmd, { cwd, timeout: CMD_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 });
       const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
@@ -429,17 +426,14 @@ export type BotEvent =
   | { type: "final"; text: string }
   | { type: "error"; message: string };
 
-const SYSTEM = (cwd: string, tier: string, mode: Mode = "readonly") => `你是 Krystal Bot——Krystal 平台的原生成员。
+const SYSTEM = (cwd: string) => `你是 Krystal Bot——Krystal 平台的原生成员（写作者）。
 工作目录：${cwd}
-当前档位：${tier}（终端模式：${modeLabel(mode)}）
 规则：
 - 调工具前先用一句话说明意图；工具输出会由系统回填给你
-- 终端模式：${modeLabel(mode)}${mode === "readonly"
-  ? "（只读）：只能查看与跑白名单命令，写文件/写类命令会被拒绝——不要尝试"
-  : "（完全访问）：可用 write_file/edit_file 改文件；run_command 白/灰名单直通、名单外的非破坏命令也放行；仅删除类（rm）、提权（sudo）、git push、系统级命令被黑名单拦截——改完记得验证（构建/测试）"}
-- 像真正的工程师一样干活：多步查证（read_file 可 offset/limit 分段），动手前先看清现状
+- 终端在围栏内完全可用：write_file/edit_file 改文件；run_command 跑构建/测试/git 等；仅删除类（rm）、提权（sudo）、git push、磁盘/系统级命令被安全网拦截——不要尝试
 - 记忆是活的认知：新信息与已有记忆矛盾或使其过时 → 用 memory 的 supersede 刷新旧条（旧条保留可检索），不要无脑堆新条；remember 结果里回显的「相关旧知」正是在告诉你该刷新谁
 - 主动沉淀（事件驱动，不等人吩咐）：工作中学到值得跨会话保留的东西——用户偏好、项目事实、踩过的坑、关键决定 → 当场 memory remember（带 entities 和 evidence）；回合收尾前若有未沉淀的重要发现，先记住再交最终回答
+- 像真正的工程师一样干活：多步查证（read_file 可 offset/limit 分段），动手前先看清现状
 - 回答精炼，用中文；先给结论，再给依据（文件:行号）
 - 不使用 emoji（平台审美：纯文字/几何符号）`;
 
@@ -447,15 +441,14 @@ export async function runBotTask(opts: {
   cfg: BuilderConfig;
   cwd: string;
   events: SessionEvent[];
-  mode?: Mode;
   signal?: AbortSignal;
   onEvent: (e: BotEvent) => void;
 }): Promise<void> {
-  const { cfg, cwd, events, signal, onEvent, mode = "readonly" } = opts;
+  const { cfg, cwd, events, signal, onEvent } = opts;
   // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
   const mem = memoryBlock();
-  const system = SYSTEM(cwd, mode === "full" ? "写作者" : "阅读者", mode) + (mem ? `\n\n${mem}` : "");
-  const tools = TOOLS_FOR(mode);
+  const system = SYSTEM(cwd) + (mem ? `\n\n${mem}` : "");
+  const tools = TOOLS;
   const win = contextWindow(cfg.model) ?? assumedWindow; // 窗口未知 → 128k 保守假设（报错学习会自动纠准）
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));
   const summarizeAt = Number(process.env.KRYSTAL_CONTEXT_SUMMARIZE_AT ?? Math.round(win * 0.85));
@@ -535,7 +528,7 @@ export async function runBotTask(opts: {
       messages.push({ role: "assistant", content: content || null, tool_calls: toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: t.args } })) });
       for (const t of toolCalls) {
         onEvent({ type: "tool_start", id: t.id, name: t.name, args: t.args });
-        const r = await executeTool(t.name, t.args, cwd, mode);
+        const r = await executeTool(t.name, t.args, cwd);
         onEvent({ type: "tool_result", id: t.id, name: t.name, ok: r.ok, denied: !!r.denied, output: r.output });
         const toolContent = (r.denied ? "[策略闸门拒绝] " : "") + r.output;
         fresh.push({ t: "msg", at: new Date().toISOString(), role: "tool", content: toolContent, toolCallId: t.id });

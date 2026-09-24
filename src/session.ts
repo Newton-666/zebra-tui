@@ -11,8 +11,6 @@ export interface BotMeta {
   kind: "bot";
   /** 会话名（/name 设置；用于历史列表与状态行） */
   name?: string;
-  /** 终端模式（/mode 弹窗设置）：只读 / 完全访问 */
-  mode?: "readonly" | "full";
   cwd: string;
   model: string;
   tier: string;
@@ -34,10 +32,10 @@ const metaFile = (id: string) => path.join(dirOf(id), "bot.json");
 
 export const newBotSessionId = (d = new Date()) => `bot-${d.toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
 
-export function createBotSession(opts: { cwd: string; model: string; tier: string; mode?: "readonly" | "full"; id?: string }): BotMeta {
+export function createBotSession(opts: { cwd: string; model: string; tier: string; id?: string }): BotMeta {
   const id = opts.id ?? newBotSessionId();
   const at = new Date().toISOString();
-  const meta: BotMeta = { id, kind: "bot", cwd: opts.cwd, model: opts.model, tier: opts.tier, mode: opts.mode ?? "readonly", createdAt: at, updatedAt: at };
+  const meta: BotMeta = { id, kind: "bot", cwd: opts.cwd, model: opts.model, tier: opts.tier, createdAt: at, updatedAt: at };
   fs.mkdirSync(dirOf(id), { recursive: true });
   fs.writeFileSync(metaFile(id), `${JSON.stringify(meta, null, 2)}\n`);
   appendEvent(id, { t: "meta", at, cwd: opts.cwd, model: opts.model, tier: opts.tier });
@@ -116,20 +114,6 @@ export function renameSession(id: string, name: string): BotMeta | undefined {
   const m = loadBotMeta(id);
   if (!m) return undefined;
   m.name = name.trim().slice(0, 40) || undefined;
-  m.updatedAt = new Date().toISOString();
-  try {
-    fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);
-  } catch {
-    return undefined;
-  }
-  return m;
-}
-
-/** /mode 弹窗：设置终端模式（只读 / 完全访问） */
-export function setSessionMode(id: string, mode: "readonly" | "full"): BotMeta | undefined {
-  const m = loadBotMeta(id);
-  if (!m) return undefined;
-  m.mode = mode;
   m.updatedAt = new Date().toISOString();
   try {
     fs.writeFileSync(metaFile(id), `${JSON.stringify(m, null, 2)}\n`);
