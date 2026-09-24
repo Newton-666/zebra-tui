@@ -772,13 +772,38 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     },
     invalidate(): void {},
   };
-  // ── 工作指示（pi 的 Working 同型）：busy 时显示 spinner·状态（玫瑰待更好的缩小方案再回归）
+  // ── 工作指示（pi 的 Working 同型）：busy 时显示 spinner·状态（英文 · 蓝字 · 扫光）
   const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let workingTick = 0;
+  const STATE_EN: Record<string, string> = {
+    "连接中": "connecting",
+    "思考中": "thinking",
+    "回答中": "answering",
+    "整理早期摘要": "compacting",
+    "完成": "done",
+    "出错": "error",
+  };
+  const stateEn = (s: string): string => {
+    if (STATE_EN[s]) return STATE_EN[s]!;
+    if (s.startsWith("工具 ")) return `tool · ${s.slice(3)}`;
+    if (s.startsWith("重试 ")) return `retrying ${s.slice(2)}`;
+    return s;
+  };
+  /** 扫光：亮蓝窗口（3 字符宽）随 tick 在蓝字上从左往右游走 */
+  const sweep = (text: string, tick: number): string => {
+    const BLUE = "38;5;39", BRIGHT = "38;5;117";
+    const period = Math.max([...text].length + 6, 10);
+    let out = "";
+    [...text].forEach((ch, i) => {
+      const d = (i - (tick % period) + period) % period;
+      out += `\x1b[${d < 3 ? BRIGHT : BLUE}m${ch}\x1b[0m`;
+    });
+    return out;
+  };
   const workingComp: Component = {
     render(w: number): string[] {
       if (!busy) return [];
-      return [truncateToWidth(`${fg(BLUE_LIGHT, SPINNER[Math.floor(workingTick / 2) % SPINNER.length]!)} ${state}`, w, "")];
+      return [truncateToWidth(`${fg(BLUE_LIGHT, SPINNER[Math.floor(workingTick / 2) % SPINNER.length]!)} ${sweep(stateEn(state), workingTick)}`, w, "")];
     },
     invalidate(): void {},
   };
