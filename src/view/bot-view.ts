@@ -497,7 +497,35 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   const openOverlay = (picker: Component & { handleInput(d: string): void }, width = 92): void => {
     closeOverlay();
-    const handle = tui.showOverlay(picker, { width, maxHeight: "70%", anchor: "center", margin: 2 });
+    // 面板样式（与 model-picker 的圆角弹层同一家族）：描边 + 实底背景，锚在输入框上方 ——
+    // 之前是居中且无框无底，与终端背景叠在一起
+    const BG = "\x1b[48;5;236m";
+    const BD = "\x1b[38;5;45m";
+    const RESET = "\x1b[0m";
+    const bordered: Component = {
+      render: (w: number) => {
+        const inner = Math.max(20, w - 2);
+        const bgLine = (l: string) => {
+          const padded = l + " ".repeat(Math.max(0, inner - visibleWidth(l)));
+          // 行内若有 reset（列表行样式切换处），reset 后重新上底色，保证整行实底
+          return BG + padded.replace(/\x1b\[0m/g, RESET + BG) + RESET;
+        };
+        const edge = (l: string, r: string) => BD + l + BG + "─".repeat(inner) + BD + r + RESET;
+        return [
+          edge("╭", "╮"),
+          ...picker.render(inner).map((l) => BD + "│" + RESET + bgLine(l) + BD + "│" + RESET),
+          edge("╰", "╯"),
+        ];
+      },
+      handleInput: (d: string) => picker.handleInput(d),
+      invalidate: () => picker.invalidate(),
+    };
+    const handle = tui.showOverlay(bordered, {
+      width,
+      maxHeight: "70%",
+      anchor: "bottom-center", // 浮在输入框上方，不挡全屏；底部留出状态行 + 输入框的高度
+      margin: { top: 1, bottom: 6, left: 0, right: 0 },
+    });
     handle.focus?.();
     overlayKeys = (d: string) => picker.handleInput(d); // 平台的 overlay 自动聚焦不生效 → 显式转发
     overlayHandle = handle;

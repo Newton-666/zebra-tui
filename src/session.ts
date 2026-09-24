@@ -221,9 +221,11 @@ export function messagesFrom(events: SessionEvent[]): { role: string; content?: 
 
 /** 模型上下文窗口（内置常见表；不猜不探测，未知按 128k） */
 const WINDOWS: [RegExp, number][] = [
-  [/^glm-4\.[567]/, 200_000],
-  // glm-5.3-flash 实测 ≥958k prompt 成功（2026-09-24 向端点探测；旧表写 200k 导致百分比虚高、
-  // 折叠/摘要阈值提前触发 —— 即「上下文用得快」的主因）
+  // 按智谱官方规格：4.5 系 128K · 4.6/4.7 200K · glm-5.3 家族 1M
+  // （1M 为向端点探测所得：glm-5.3-flash 实测 ≥958k prompt 成功，2026-09-24；
+  //   旧表写 200k 导致百分比虚高、折叠/摘要阈值提前触发）
+  [/^glm-4\.5/, 128_000],
+  [/^glm-4\.[67]/, 200_000],
   [/^glm-5/, 1_000_000],
   [/^glm-4(-flash|-air|-long)?$/, 128_000],
   [/deepseek/, 128_000],
