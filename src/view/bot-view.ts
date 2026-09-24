@@ -224,7 +224,7 @@ export class ToolBlock implements Component {
           : fg(BLUE, "●");
     const head = `  ${dim("╰─")} ${dot} ${bold(this.name)} ${dim(this.summary)}`;
     const body = this.detail.map((d) =>
-      "  " + dim("  │   ") + (d.kind === "del" ? fg(DIFF_DEL, dim("− " + d.text)) : d.kind === "add" ? fg(DIFF_ADD, dim("+ " + d.text)) : dim("  " + d.text)),
+      "      " + (d.kind === "del" ? fg(DIFF_DEL, dim("− " + d.text)) : d.kind === "add" ? fg(DIFF_ADD, dim("+ " + d.text)) : dim(d.text)),
     );
     if (this.note) body.push("    " + dim(this.note));
     return [head, ...body].map((l) => truncateToWidth(l, w, ""));
