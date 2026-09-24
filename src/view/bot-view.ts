@@ -18,7 +18,7 @@ import {
   type EditorTheme,
   type MarkdownTheme,
 } from "../../deps/pi-tui/dist/index.js";
-import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg, FG_WHITE } from "../ui/ansi.ts";
+import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
 import { activeFacts, importMirror, loadFacts, renderGraph } from "../memory.ts";
