@@ -54,12 +54,13 @@ assert.equal(M.loadFacts().find((x) => x.id === f2.id)?.supersededBy, sup!.id, "
 assert.ok(!M.activeFacts(M.loadFacts()).some((x) => x.id === f2.id), "被取代的不参与注入");
 console.log("4) 五查询 + 取代（旧条不删）✓");
 
-// ── M2：注入块稳定序 + 不含易变值
-const block = M.memoryBlock();
-assert.ok(block.includes("长期记忆"), "有注入块");
-assert.ok(!/used \d|天前|\d{4}-\d{2}-\d{2}/.test(block), "注入块不含年龄/次数等易变值（缓存友好）");
-assert.equal(block, M.memoryBlock(), "同集合 → 字节相同");
-console.log("5) 注入块稳定且无易变值 ✓");
+// ── M2：纯检索架构不变式（§12.4 #22：注入通道已废除）+ 镜像确定性
+assert.ok((M as Record<string, unknown>).memoryBlock === undefined, "memoryBlock 已删——记忆不注入，只走查询");
+assert.ok((M as Record<string, unknown>).cognitionFacts === undefined && (M as Record<string, unknown>).PIN_LIMIT === undefined, "注入相关导出全部清除");
+const mirror1 = fs.readFileSync(M.mirrorPath(), "utf8");
+M.writeMirror();
+assert.equal(fs.readFileSync(M.mirrorPath(), "utf8"), mirror1, "镜像重生成幂等（人可读层字节稳定）");
+console.log("5) 纯检索架构（无注入导出）+ 镜像幂等 ✓");
 
 // ── M2：镜像（分节 + 双向导入 + 幂等 + 备份）
 assert.ok(fs.readFileSync(M.mirrorPath(), "utf8").includes(f1.id), "镜像含事实 id");
@@ -164,10 +165,11 @@ console.log("\nALL MEMORY TESTS PASS");
   assert.ok(a.scope === scope && a.by === `${scope}/architrct`, "断言应带 by 与 scope");
   const cs = M.conflicts(scope);
   assert.ok(cs.some((c) => (c.a.id === a.id && c.b.id === b.id) || (c.a.id === b.id && c.b.id === a.id)), "应发现成员间相反断言");
-  assert.ok(!M.memoryBlock().includes("npm test 通过"), "团队断言不进入 Bot 注入块（scope 隔离）");
+  assert.ok(M.recall("npm test").some((x) => x.scope === scope), "默认查询可见团队事实（主动检索不过滤——隔离职责在被动通道，已随注入废除）");
+  assert.ok(M.recall("npm test", 6, scope).every((x) => x.scope === scope), "显式 scope 参数 → 只返回该团队事实");
   const g = M.renderGraph(scope);
   assert.ok(g.facts >= 2 && g.conflicts >= 1, "团队记忆图应含断言与矛盾");
   const kitSrc = fs.readFileSync(new URL("../src/kit.ts", import.meta.url), "utf8");
   assert.ok(kitSrc.includes('JSON.stringify({ t: "fact", f: fact })') && kitSrc.includes("scope: team.id"), "kit helper 应写团队记忆（格式守卫）");
-  console.log(`9) 团队线接入记忆图 ✓ ${g.facts} 事实 / ${g.conflicts} 矛盾 / Bot 注入块不受污染`);
+  console.log(`9) 团队线接入记忆图 ✓ ${g.facts} 事实 / ${g.conflicts} 矛盾 / 默认查询不受团队污染`);
 }

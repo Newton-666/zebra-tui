@@ -9,7 +9,7 @@ import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
 import { decide } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
-import { about, addFact, adjustTrust, conflicts, connect, markUsed, memoryBlock, recall, related, renderFacts, supersedeFact } from "./memory.ts";
+import { about, addFact, adjustTrust, conflicts, connect, markUsed, recall, related, renderFacts, supersedeFact } from "./memory.ts";
 import { assumedWindow, learnFromErrorMessage } from "./windows.ts";
 
 const execAsync = promisify(exec);
@@ -48,7 +48,7 @@ export const READER_TOOLS: BotTool[] = [
   {
     name: "memory",
     description:
-      "长期记忆（跨会话）。op=remember 写入｜recall 检索｜about 实体｜related 相关｜connect 交集｜conflicts 矛盾｜helpful/wrong 反馈某条（调信任）｜supersede 用新事实取代旧条",
+      "长期记忆（跨会话，纯检索：不注入上下文，按需查询——跨会话任务开始先 recall 任务词，碰不熟的概念先 about）。写入前分类四问：①用户偏好/工作方式 ②项目事实/结论 ③坑与修法（必须带 evidence）④会话级临时状态——一律不存。写法：一主题一条；实体给具体（忌宽泛大词）；有新证据用 supersede 刷新而非堆新条。op=remember 写入｜recall 检索｜about 实体｜related 相关｜connect 交集｜conflicts 矛盾｜helpful/wrong 反馈调信任｜supersede 取代旧条",
     parameters: {
       type: "object",
       properties: {
@@ -448,8 +448,8 @@ export async function runBotTask(opts: {
 }): Promise<void> {
   const { cfg, cwd, events, signal, onEvent, identity } = opts;
   // ── 上下文装配（M1）：折叠 →（必要时）摘要 → 稳定前缀 + 尾巴
-  const mem = memoryBlock();
-  const system = SYSTEM(cwd) + (identity ? `\n\n${identity}` : "") + (mem ? `\n\n${mem}` : "");
+  // spec §12.4 #22：纯检索架构——system 只含静态说明，记忆不注入，全部走工具查询
+  const system = SYSTEM(cwd) + (identity ? `\n\n${identity}` : "");
   const tools = TOOLS;
   const win = contextWindow(cfg.model) ?? assumedWindow; // 窗口未知 → 128k 保守假设（报错学习会自动纠准）
   const foldAt = Number(process.env.KRYSTAL_CONTEXT_FOLD_AT ?? Math.round(win * 0.7));

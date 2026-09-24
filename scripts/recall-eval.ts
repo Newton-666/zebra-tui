@@ -10,7 +10,7 @@
 //   [{ "q": "闸门白名单在哪实现", "expect": ["src/bot.ts", "白名单"] }, ...]
 // expect 里任一关键词命中召回结果即算命中（大小写不敏感；同时看事实文本与实体）
 import fs from "node:fs";
-import { activeFacts, loadFacts, memoryBlock, recall } from "../src/memory.ts";
+import { activeFacts, loadFacts, recall } from "../src/memory.ts";
 
 const [file, ...rest] = process.argv.slice(2);
 if (!file) {
@@ -36,14 +36,11 @@ for (const c of cases) {
   rows.push(`${ok ? "命中" : "未命中"}  ${c.q}  →  ${got.length ? got.map((f) => f.id).join(",") : "（无结果）"}`);
 }
 
-const block = memoryBlock();
-const blockTokens = Math.round(block.length / 3);
 const rate = cases.length ? (hit / cases.length) * 100 : 0;
 
 console.log(`记忆回归（recall@${limit}）`);
 console.log(`  用例 ${cases.length} · 命中 ${hit} · 命中率 ${rate.toFixed(1)}%`);
-console.log(`  注入块：${block.length} 字符 ≈ ${blockTokens} tokens（信噪比：${(cases.length ? blockTokens / cases.length : 0).toFixed(0)} tokens/用例）`);
-console.log(`  事实总数 ${activeFacts((await import("../src/memory.ts")).loadFacts()).length}`);
+console.log(`  事实总数 ${activeFacts(loadFacts()).length}（纯检索架构：无注入块，token 成本 = 查询往返）`);
 console.log("");
 for (const r of rows) console.log(`  ${r}`);
 console.log("");

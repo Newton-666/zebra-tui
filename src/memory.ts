@@ -265,38 +265,10 @@ export function conflicts(scope?: string): { a: Fact; b: Fact; reason: string }[
   return out.slice(0, 8);
 }
 
-// ---------- 注入块（稳定序 → 缓存友好；不含年龄/次数等易变值） ----------
-
-export const PIN_LIMIT = 20;
-/**
- * 注入视图 = 「每实体的最新认知」：同主实体（entities[0]）只保留最新一条，旧条仍在库、recall 可回。
- * 「新知刷新旧知」——不是往堆上叠，而是像认知一样被新证据覆盖（2026-09-23 owner 拍板，§12.4 #16）。
- * 确定性规则：facts 须已按创建序升序 → 后写覆盖；无实体的孤儿各自成组（无法被刷新，始终注入）。
- */
-export function cognitionFacts(facts: Fact[]): Fact[] {
-  const byPrimary = new Map<string, Fact>();
-  for (const f of facts) byPrimary.set(f.entities[0] ?? `id:${f.id}`, f);
-  return [...byPrimary.values()];
-}
-export function memoryBlock(limit = PIN_LIMIT, scope?: string): string {
-  // 注入块默认只取「全局记忆」（scope 未设的）；团队断言有各自 scope，不污染 Bot 的上下文
-  const facts = activeFacts(loadFacts())
-    .filter((f) => (scope ? f.scope === scope : !f.scope))
-    .slice()
-    .sort((a, b) => (a.created < b.created ? -1 : 1)); // 稳定序：创建序
-  if (!facts.length) return "";
-  const merged = cognitionFacts(facts);
-  // 实体多于上限：优先注入最新的认知（新知优先）；输出仍按创建序稳定排列
-  const selected =
-    merged.length <= limit
-      ? merged
-      : [...merged]
-          .sort((a, b) => (a.created < b.created ? 1 : -1))
-          .slice(0, limit)
-          .sort((a, b) => (a.created < b.created ? -1 : 1));
-  const lines = selected.map((f) => `- ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""}`);
-  return `[长期记忆（facts.jsonl 的镜像；可用 memory 工具 recall/about/connect 检索）]\n${lines.join("\n")}`;
-}
+// ---------- 注入通道已废除（spec §12.4 #22，2026-09-24 owner：纯检索架构） ----------
+// 记忆绝不预装进上下文；一切访问走五查询工具。原 memoryBlock/cognitionFacts/PIN_LIMIT 已删——
+// 无注入槽即无淘汰问题；prompt 前缀字节永续（缓存命中率最大化）。
+// 「必须天生知道」的人格级事实走人工编辑 prompt 文件（人审、低频、字节稳定）。
 
 // ---------- 人可读镜像（LN-1 形状：运行时真源是 jsonl，md 是人的入口） ----------
 
