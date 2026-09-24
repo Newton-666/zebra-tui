@@ -283,6 +283,11 @@ export const SLEEP_SOFT = 85;
 export const SLEEP_HARD = 100;
 
 let sleepRunning = false; // 防重入旗：睡眠中再调 memory 直接放行查询
+let sleepError: string | undefined;
+/** 最近一次睡眠失败的原因（ undefined = 没失败过/成功）——UI 直接展示，不再让人猜 */
+export function lastSleepError(): string | undefined {
+  return sleepError;
+}
 
 export function globalFactCount(): number {
   return activeFacts(loadFacts()).filter((f) => !f.scope).length;
@@ -319,19 +324,21 @@ export interface SleepResult {
 /** 睡眠整理：打包全局活跃事实 → 模型出策展方案 → 内核逐条应用 append-only 事件 → 报告落盘。
  *  失败/进行中返回 undefined（调用方附注跳过，不阻塞）。 */
 export async function sleepMemories(cfg: BuilderConfig): Promise<SleepResult | undefined> {
-  if (sleepRunning) return undefined;
+  sleepError = undefined;
+  if (sleepRunning) { sleepError = "睡眠整理进行中"; return undefined; }
   const facts = activeFacts(loadFacts()).filter((f) => !f.scope);
-  if (!facts.length) return undefined;
+  if (!facts.length) { sleepError = "全局记忆库为空"; return undefined; }
   sleepRunning = true;
   try {
     const events: SleepEvent[] = [];
     const list = facts
       .map((f, i) => `${i + 1}. [${f.id}] ${f.text}  实体[${f.entities.join(",")}] trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`)
       .join("\n");
-    const raw = await chat(cfg, SLEEP_PLAN_PROMPT(list), { timeoutMs: 120_000, maxTokens: 4096 });
+    // 思考型模型可能把 token 花在 reasoning 上 → lenient + 大 max_tokens（lenient 下空 content 返回 reasoning）
+    const raw = await chat(cfg, SLEEP_PLAN_PROMPT(list), { timeoutMs: 120_000, maxTokens: 8192, lenient: true });
     const cleaned = raw.replace(/^\s*```(?:json)?/, "").replace(/```\s*$/, "").trim();
     const ps = cleaned.indexOf("{"), pe = cleaned.lastIndexOf("}");
-    if (ps < 0 || pe <= ps) return undefined;
+    if (ps < 0 || pe <= ps) { sleepError = "模型未返回可解析的策展 JSON"; return undefined; }
     const plan = JSON.parse(cleaned.slice(ps, pe + 1)) as {
       merge?: { sources?: string[]; text?: string; entities?: string[] }[];
       supersede?: { id?: string; text?: string }[];
@@ -393,7 +400,9 @@ export async function sleepMemories(cfg: BuilderConfig): Promise<SleepResult | u
     ].join("\n");
     try { fs.writeFileSync(reportPath, report + "\n"); } catch { /* 降级 */ }
     return { applied, skipped, reportPath, summary: `应用 ${applied} · 跳过 ${skipped} · 库 ${facts.length}→${after}`, events };
-  } catch {
+  } catch (e) {
+    sleepError = e instanceof Error ? e.message : String(e);
+    console.error("[sleep] 整理失败:", sleepError);
     return undefined;
   } finally {
     sleepRunning = false;

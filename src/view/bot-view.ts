@@ -21,7 +21,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
-import { activeFacts, importMirror, loadFacts, renderGraph, sleepMemories, type SleepMarks } from "../memory.ts";
+import { activeFacts, importMirror, lastSleepError, loadFacts, renderGraph, sleepMemories, type SleepMarks } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
