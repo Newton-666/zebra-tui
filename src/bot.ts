@@ -229,7 +229,14 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, mo
         const text = str(args.text);
         if (!text) return { ok: false, output: "op=remember 需要 text" };
         const f = addFact({ text, entities: arr(args.entities), evidence: str(args.evidence) || undefined, by: "bot" });
-        return { ok: true, output: `${f.existed ? "已有此条（已加强信任）" : "已记住"} [${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}` };
+        // 认知刷新提示：写入后回看同主实体的旧知（确定性检索）——若本条是更新/纠正，引导模型接着 supersede
+        let hint = "";
+        if (!f.existed && f.entities.length) {
+          const kin = about(f.entities[0]!).filter((x) => x.id !== f.id).slice(0, 3);
+          if (kin.length)
+            hint = `\n相关旧知：\n${renderFacts(kin)}\n若本条是对旧知的更新/纠正，请接着 supersede(id, 本条)，不要两并存`;
+        }
+        return { ok: true, output: `${f.existed ? "已有此条（已加强信任）" : "已记住"} [${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${hint}` };
       }
       if (op === "recall") {
         const r = recall(str(args.query));
@@ -430,6 +437,7 @@ const SYSTEM = (cwd: string, tier: string, mode: Mode = "readonly") => `你是 K
   ? "（只读）：只能查看与跑白名单命令，写文件/写类命令会被拒绝——不要尝试"
   : "（完全访问）：可用 write_file/edit_file 改文件；run_command 白/灰名单直通、名单外的非破坏命令也放行；仅删除类（rm）、提权（sudo）、git push、系统级命令被黑名单拦截——改完记得验证（构建/测试）"}
 - 像真正的工程师一样干活：多步查证（read_file 可 offset/limit 分段），动手前先看清现状
+- 记忆是活的认知：新信息与已有记忆矛盾或使其过时 → 用 memory 的 supersede 刷新旧条（旧条保留可检索），不要无脑堆新条；remember 结果里回显的「相关旧知」正是在告诉你该刷新谁
 - 回答精炼，用中文；先给结论，再给依据（文件:行号）
 - 不使用 emoji（平台审美：纯文字/几何符号）`;
 
