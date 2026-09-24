@@ -68,7 +68,7 @@ export const READER_TOOLS: BotTool[] = [
   {
     name: "run_command",
     description:
-      "跑一条终端命令（管道/重定向可用）。构建、测试、git add·commit、名单外的非破坏命令都放行；仅删除类（rm）、提权（sudo）、git push、磁盘/系统级命令被安全网拦截",
+      "跑一条终端命令（管道/重定向可用）。GitHub 能力（git push、gh PR/issue）、构建、测试、常规工程命令都放行；仅不可逆命令（rm/git clean/reset --hard/force push/删远端分支/磁盘、系统级）与隐私内容（凭据文件、.env、导出环境变量）被安全网拦截",
     parameters: {
       type: "object",
       properties: { command: { type: "string", description: "命令行" } },
@@ -430,7 +430,7 @@ const SYSTEM = (cwd: string) => `你是 Krystal Bot——Krystal 平台的原生
 工作目录：${cwd}
 规则：
 - 调工具前先用一句话说明意图；工具输出会由系统回填给你
-- 终端在围栏内完全可用：write_file/edit_file 改文件；run_command 跑构建/测试/git 等；仅删除类（rm）、提权（sudo）、git push、磁盘/系统级命令被安全网拦截——不要尝试
+- 终端在围栏内完全可用：write_file/edit_file 改文件；run_command 跑构建/测试/git push/gh（PR·issue）；仅不可逆（删除类、force push、系统级）与隐私（凭据文件、.env、导出环境变量）被安全网拦截——不要尝试
 - 记忆是活的认知：新信息与已有记忆矛盾或使其过时 → 用 memory 的 supersede 刷新旧条（旧条保留可检索），不要无脑堆新条；remember 结果里回显的「相关旧知」正是在告诉你该刷新谁
 - 主动沉淀（事件驱动，不等人吩咐）：工作中学到值得跨会话保留的东西——用户偏好、项目事实、踩过的坑、关键决定 → 当场 memory remember（带 entities 和 evidence）；回合收尾前若有未沉淀的重要发现，先记住再交最终回答
 - 像真正的工程师一样干活：多步查证（read_file 可 offset/limit 分段），动手前先看清现状
