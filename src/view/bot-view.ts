@@ -138,9 +138,8 @@ export class UserBlock implements Component {
 
 /** 工具调用块：与 pi 同源（tool-execution.js）——Box(padX=1, padY=1, toolXxxBg)
  *  状态色整页宽背景 + 加粗工具名 + dim 输出 + 截断提示；块内只用 bold/dim（\x1b[22m 还原）以免清掉底色 */
-// 色板：成功 = 纯绿加深一档（48;5;28 #008700，同色相去灰）；执行中 = 灰蓝(60)；拦下/出错 = 灰玫(95)
-//   块感统一靠「整行实底 + 明度相近」，不用往绿里掺灰（owner：不要 hue 偏移、不要灰）
-const TOOL_BG: Record<string, string> = { pending: "48;5;60", ok: "48;5;28", denied: "48;5;95", error: "48;5;95" };
+// 色板：成功 = 纯绿再深一档（48;5;22 #005F00，同色相去灰；owner 选定）；执行中 = 灰蓝(60)；拦下/出错 = 灰玫(95)
+const TOOL_BG: Record<string, string> = { pending: "48;5;60", ok: "48;5;22", denied: "48;5;95", error: "48;5;95" };
 const TOOL_MARK: Record<string, string> = { pending: "38;5;223", ok: "38;5;231", denied: "38;5;231", error: "38;5;231" };
 // 块内文字用实色（dim 在彩底上会发灰）：标题加粗白、参数浅青白、输出浅灰、提示中灰
 const T_TITLE = "\x1b[38;5;231m";
