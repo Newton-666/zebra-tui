@@ -168,7 +168,7 @@ function cmdBoard(_c, args) {
       };
       const factsFile = path.join(os.homedir(), ".krystal", "facts.jsonl");
       fs.mkdirSync(path.dirname(factsFile), { recursive: true });
-      fs.appendFileSync(factsFile, JSON.stringify({ t: "fact", f: fact }) + "\n");
+      fs.appendFileSync(factsFile, JSON.stringify({ t: "fact", f: fact }) + "\\n");
       lines_msg = "已追加到团队白板（并记入团队记忆图）";
     } catch {
       lines_msg = "已追加到团队白板";

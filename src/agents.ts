@@ -133,6 +133,7 @@ export function ensureTeamSession(config: TeamConfig, useResume: boolean): strin
   const name = config.tmuxSession;
   const cliCount = config.members.filter((m) => m.type !== "krystal").length;
   const aligned = (): string[] => config.members.map((m) => config.paneIds?.[m.id] ?? "");
+  ensureKit(config); // 幂等：CLI 模板修复随每次进入团队自动再生
   // 排布规则升级 → 引擎窗格与网格不再对齐，重建一次（成员用各自的 resume 命令，上下文由 agent 自身持久化）
   if (config.layoutVersion !== LAYOUT_VERSION && sessionAlive(name)) killSession(name);
   if (sessionAlive(name)) {
