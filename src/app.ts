@@ -117,6 +117,9 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
     krystal.set(m.id, km);
     config.memberSessions = { ...(config.memberSessions ?? {}), [m.id]: km.sessionId };
     saveTeamConfig(config);
+    // 与 tmux 成员的注入消息对等：krystal 的身份/简报在 SYSTEM，这里补可见性与团队日志
+    km.note(`已注入身份与团队简报（SYSTEM）· 模型 ${cfg.model}`);
+    appendEvent(config.id, { t: new Date().toISOString(), type: "note", text: `已向 ${m.name}（krystal）注入身份与团队简报` });
   }
 
   // --- team grid (custom proportional columns + draggable divider)

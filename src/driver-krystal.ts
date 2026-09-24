@@ -6,7 +6,22 @@ import { runBotTask, type BotEvent } from "./bot.ts";
 import { Transcript, ToolBlock, StreamText, UserBlock, BOT_THEME } from "./view/bot-view.ts";
 import { Markdown } from "../deps/pi-tui/dist/index.js";
 import { dim } from "./ui/ansi.ts";
+import { renderPortrait, type PortraitInfo } from "./ui/portrait.ts";
+import { activeFacts, loadFacts } from "./memory.ts";
 import type { BuilderConfig } from "./builder.ts";
+import type { Component } from "../deps/pi-tui/dist/index.js";
+
+/** 开场画像：宽度响应式（格子里自动降档到迷你玫瑰） */
+class PortraitBlock implements Component {
+  private info: PortraitInfo;
+  constructor(info: PortraitInfo) {
+    this.info = info;
+  }
+  render(w: number): string[] {
+    return renderPortrait(Math.max(34, Math.min(w, 100)), 40, this.info);
+  }
+  invalidate(): void {}
+}
 
 export interface KrystalMemberOpts {
   member: { id: string; name: string; role?: string };
@@ -38,7 +53,28 @@ export class KrystalMember {
     this.cfg = opts.config;
     this.sessionId = opts.sessionId ?? createBotSession({ cwd: opts.cwd, model: opts.config.model, tier: "写作者" }).id;
     this.onEvent = (e) => this.handle(e);
-    this.replay(); // 驾驶舱 resume：事件流 → 组件（pi 式「历史思考可见」也成立）
+    // 开场画像置顶（pi/独立视图同款）；intro 事件只在首次写入
+    const evs = loadEvents(this.sessionId);
+    this.transcript.items.push(
+      new PortraitBlock({
+        name: opts.member.name,
+        model: opts.config.model,
+        tier: "写作者",
+        cwd: opts.cwd,
+        sessionId: this.sessionId.replace(/^bot-/, ""),
+        memories: activeFacts(loadFacts()).length,
+      }),
+      "",
+    );
+    if (!evs.some((e) => e.t === "intro"))
+      appendEvent(this.sessionId, { t: "intro", at: new Date().toISOString(), cwd: opts.cwd, model: opts.config.model, tier: "写作者" });
+    this.replayFrom(evs);
+  }
+
+  /** 可见性备注（身份/简报注入等，与 tmux 成员的注入消息对等） */
+  note(text: string): void {
+    this.transcript.items.push(dim(`  ${text}`), "");
+    this.touch();
   }
 
   get busyFlag(): boolean {
@@ -152,6 +188,13 @@ export class KrystalMember {
       case "final": {
         this.closeStream();
         this.state = "完成";
+        // 流式原文块 → Markdown 块：先移除原块（否则重复打印 —— bot-view 同规则）
+        const streamed = this.streamBlock;
+        if (streamed) {
+          const idx = this.transcript.items.indexOf(streamed);
+          if (idx >= 0) this.transcript.items.splice(idx, 1);
+          this.transcript.forget(streamed);
+        }
         if (e.text.trim()) this.transcript.items.push(new Markdown(e.text, 1, 0, BOT_THEME), "");
         appendEvent(this.sessionId, {
           t: "msg",
@@ -196,8 +239,8 @@ export class KrystalMember {
   }
 
   /** 驾驶舱 resume：事件流 → 组件（与 runBotFlow.rebuild 同规则） */
-  private replay(): void {
-    for (const e of loadEvents(this.sessionId)) {
+  private replayFrom(evs: ReturnType<typeof loadEvents>): void {
+    for (const e of evs) {
       if (e.t !== "msg") continue;
       if (e.role === "user") {
         this.transcript.items.push(new UserBlock(e.content), "");
