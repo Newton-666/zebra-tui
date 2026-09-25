@@ -40,6 +40,7 @@ import {
   trashSession,
 } from "../session.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
+import { createTextSegment, type TextSegment } from "./stream-seg.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
 const THEME = {
@@ -878,50 +879,40 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     },
   };
 
-  // 流动块：思考/回答各自一个多行组件，delta 原地增长
-  let streamItem: Component | undefined;
-  let streamMd: Markdown | undefined;
-  let streamMdText = "";
-  let streamMdDone = false;
+  // 流动块：思考/回答各自一个多行组件，delta 原地增长。
+  // 教训（2026-09-25）：此前所有回答块共用一个 `streamMd` 槽位，块在 render 时读「槽位当前值」，
+  // 于是新一段回答一建就把槽位指过去 —— 旧块立刻改显新文字（旧答复消失 + 同一段印两遍）；
+  // `final` 的校准也写进槽位，先答后记时会把上一段长答案覆盖掉。
+  // 现在改为「段即对象」：每段持有自己的 Markdown/文本/定格标记（契约与回归见 view/stream-seg.ts）。
+  let liveThinking: StreamText | undefined;
+  let liveText: TextSegment | undefined;
   let streamKind: "thinking" | "text" | null = null;
   let currentTool: ToolBlock | undefined;
-  const beginStream = (prefix: string, style: (t: string) => string) => {
+  const beginThinking = () => {
     if (streamKind) closeStream();
-    if (prefix) {
-      // 思考：dim 纯文本流（成本最低，观感与 pi 的 thinking 一致）
-      streamItem = new StreamText(prefix, style);
-      push(streamItem);
-      streamKind = "thinking";
-    } else {
-      // 回答：pi 同款——边流式边渲染真 Markdown（部分文本喂 Markdown，每帧重解析；
-      // pi-tui 自带 trimPartialClosingFences 处理未闭合代码围栏）。完成后原地定格，不再替换。
-      streamMd = new Markdown("", 1, 0, BOT_THEME);
-      streamMdDone = false;
-      streamMdText = ""; // 每段从零累积（工具调用分隔的多段回答，各段独立）
-      const wrapper: Component = {
-        get volatile() {
-          return !streamMdDone; // 流式中逐帧重渲；完成后恢复缓存
-        },
-        render(wid: number): string[] {
-          return streamMd!.render(wid);
-        },
-        invalidate(): void {
-          streamMd?.invalidate();
-        },
-      };
-      streamItem = wrapper;
-      push(wrapper);
-      streamKind = "text";
-    }
+    // 思考：dim 纯文本流（成本最低，观感与 pi 的 thinking 一致）
+    liveThinking = new StreamText("· thinking ", (t) => dim(t));
+    push(liveThinking);
+    streamKind = "thinking";
+  };
+  const beginText = () => {
+    if (streamKind) closeStream();
+    // 回答：pi 同款——边流式边渲染真 Markdown（部分文本喂 Markdown，每帧重解析；
+    // pi-tui 自带 trimPartialClosingFences 处理未闭合代码围栏）。本段结束时定格，不再替换。
+    liveText = createTextSegment(BOT_THEME);
+    push(liveText.comp);
+    streamKind = "text";
   };
   const streamTo = (delta: string) => {
-    if (streamItem instanceof StreamText) streamItem.append(delta);
-    else if (streamMd) streamMd.setText((streamMdText + delta).replace(/\s+$/, ""));
-    streamMdText += delta;
+    if (streamKind === "thinking") liveThinking?.append(delta);
+    else liveText?.append(delta);
     refresh();
   };
+  /** 结束当前段并把回答段定格（done → Transcript 转缓存；否则它会永远被当活块逐帧重渲） */
   const closeStream = () => {
-    streamItem = undefined;
+    liveText?.seal();
+    liveThinking = undefined;
+    liveText = undefined;
     streamKind = null;
   };
   /** 分段之间留一空行（pi 的做法：思考/工具/回答 各自成段） */
@@ -936,7 +927,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         state = "思考中";
         if (streamKind !== "thinking") {
           ensureGap();
-          beginStream("· thinking ", (t) => dim(t));
+          beginThinking();
         }
         tokens += e.delta.length / 4;
         streamTo(e.delta);
@@ -946,7 +937,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         state = "回答中";
         if (streamKind !== "text") {
           ensureGap();
-          beginStream("", (t) => t);
+          beginText();
         }
         tokens += e.delta.length / 4;
         streamTo(e.delta);
@@ -1048,19 +1039,25 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         break;
       }
       case "final": {
-        // 活 Markdown 已流式渲染完毕 → 原地定格（volatile 关闭 → 转入缓存），不再替换。
-        // e.text 是权威全文（流式尾部可能有 trim 差异）→ setText 校准一次。
-        streamMdDone = true;
-        // 空最终文本 ≠ 没有内容：答案可能在工具调用前已流式给出（先答后记）→ 保留流式内容
-        if (streamMd && e.text.trim()) streamMd.setText(e.text.trim());
-        const wrapper = streamItem; // 先留引用：closeStream 会清空变量
-        closeStream();
+        // 本段活 Markdown 已流式渲染完毕 → 原地定格（volatile 关闭 → 转入缓存），不再替换。
+        // e.text 是权威全文（流式尾部可能有 trim 差异）→ 对本段 setText 校准一次。
+        // 只碰「本段」：liveText 为空 = 本段没出过文字（先答后记，final 只是收尾那句）
+        // → 前面的回答段落原样保留（此前写共享槽位会把上一段整段覆盖）。
+        let seg = liveText;
+        if (!seg && e.text.trim()) {
+          // 本段没有流式文字但 final 带文字（端点未按 delta 推流 / 收尾句）→ 单独成段，不寄居在上一段里
+          ensureGap();
+          beginText();
+          seg = liveText;
+        }
+        seg?.finish(e.text);
+        closeStream(); // 定格本段
         state = "完成";
-        if (!e.text.trim() && !streamMdText.trim() && wrapper) {
-          // 真正空回答（流式也没内容）→ 移除空活组件
-          const idx = transcript.items.indexOf(wrapper);
+        if (seg && seg.isEmpty()) {
+          // 真正空回答（本段流式也没内容）→ 移除空活组件
+          const idx = transcript.items.indexOf(seg.comp);
           if (idx >= 0) transcript.items.splice(idx, 1);
-          transcript.forget(wrapper);
+          transcript.forget(seg.comp);
         } else {
           push("");
         }
