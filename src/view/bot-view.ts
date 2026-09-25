@@ -21,7 +21,7 @@ import {
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
 import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
-import { activeFacts, importMirror, lastSleepError, loadFacts, renderGraph, sleepMemories, type SleepMarks } from "../memory.ts";
+import { activeFacts, importMirror, lastSleepError, loadFacts, renderGraph, sleepMemories, undoLastSleep, type SleepMarks } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
   appendEvent,
@@ -1090,9 +1090,16 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         summaryActive = false;
         push(dim("  新会话已开始"), "");
         refresh();
-      } else if (cmd === "sleep") {
-        if (!cfg) {
-          push(dim("  睡眠整理需要平台模型——先 /login 配置"), "");
+      } else if (cmd.startsWith("sleep")) {
+        const sleepArg = cmd.slice(5).trim();
+        if (sleepArg === "undo") {
+          const u = undoLastSleep();
+          push(dim(u ? `  已反演最近一次睡眠（恢复 ${u.restored} 条）· /memory 查看` : "  没有可反演的睡眠记录"), "");
+          refresh();
+          return;
+        }
+        if (sleepArg) {
+          push(dim(`  未知参数 ${sleepArg}（用法：/sleep · /sleep undo）`), "");
           refresh();
           return;
         }
@@ -1113,7 +1120,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         };
         push(live, "");
         refresh();
-        void sleepMemories(cfg).then((r) => {
+        void sleepMemories().then((r) => {
           sleeping = false;
           const idx = transcript.items.indexOf(live);
           if (idx >= 0) transcript.items.splice(idx, 1);

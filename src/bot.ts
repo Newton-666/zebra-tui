@@ -9,7 +9,7 @@ import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
 import { decide } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
-import { about, addFact, adjustTrust, conflicts, connect, globalFactCount, markUsed, recall, related, renderFacts, sleepMemories, supersedeFact, SLEEP_HARD, SLEEP_SOFT } from "./memory.ts";
+import { about, addFact, adjustTrust, conflicts, connect, globalFactCount, lastSleepError, markUsed, recall, related, renderFacts, sleepMemories, supersedeFact, SLEEP_HARD, SLEEP_SOFT } from "./memory.ts";
 import { assumedWindow, learnFromErrorMessage } from "./windows.ts";
 
 const execAsync = promisify(exec);
@@ -151,7 +151,7 @@ export interface ToolResult {
   output: string;
 }
 
-export async function executeTool(name: string, rawArgs: string, cwd: string, cfg?: BuilderConfig): Promise<ToolResult> {
+export async function executeTool(name: string, rawArgs: string, cwd: string): Promise<ToolResult> {
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(rawArgs || "{}") as Record<string, unknown>;
@@ -222,9 +222,9 @@ export async function executeTool(name: string, rawArgs: string, cwd: string, cf
       // 睡眠协议触发（§11.6）：全局活跃事实数——软阈值附提醒，硬阈值先睡再答（owner :sleep 同流程）
       let sleepNote = "";
       const factCount = globalFactCount();
-      if (cfg && factCount >= SLEEP_HARD) {
-        const r = await sleepMemories(cfg);
-        sleepNote = r ? `〔睡眠整理已执行：${r.summary} · 报告 ${r.reportPath}〕` : "〔睡眠整理跳过（进行中/失败）——不阻塞〕";
+      if (factCount >= SLEEP_HARD) {
+        const r = await sleepMemories();
+        sleepNote = r ? `〔睡眠整理已执行：${r.summary} · 报告 ${r.reportPath}〕` : `〔睡眠整理跳过——${lastSleepError() ?? "未知原因"}〕`;
       } else if (factCount >= SLEEP_SOFT) {
         sleepNote = `〔记忆库 ${factCount}/${SLEEP_HARD}（软阈值）——建议 owner 执行 :sleep 整理〕`;
       }

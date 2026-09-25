@@ -19,7 +19,7 @@ import { KrystalMember } from "./driver-krystal.ts";
 import { loadBotModel, loadBuilder } from "./builder.ts";
 import { appendEvent, saveTeamConfig, sessionDir } from "./team.ts";
 import { briefText, ensureKit, identityText, identityUpdateText } from "./kit.ts";
-import { conflicts, renderGraph, sleepMemories } from "./memory.ts";
+import { conflicts, renderGraph, sleepMemories, undoLastSleep } from "./memory.ts";
 import { withModel } from "./models.ts";
 import { ModelPicker } from "./view/model-picker.ts";
 import { DEFAULT_COMMANDS } from "./types.ts";
@@ -451,6 +451,12 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
       renderStatus();
       return;
     }
+    if (trimmed === ":sleep undo") {
+      const u = undoLastSleep();
+      flashMsg(u ? `已反演最近一次睡眠（恢复 ${u.restored} 条）` : "没有可反演的睡眠记录");
+      renderStatus();
+      return;
+    }
     if (trimmed === ":sleep") {
       const cfg = loadBuilder();
       if (!cfg) {
@@ -459,7 +465,7 @@ export async function runTeamApp(config: TeamConfig, seedScreens: Map<string, st
         return;
       }
       flashMsg("睡眠整理中…（模型出策展方案，内核逐条执行 append-only 事件）");
-      void sleepMemories(cfg).then((r) => {
+      void sleepMemories().then((r) => {
         flashMsg(r ? `睡眠整理完成：${r.summary}\n报告：${r.reportPath}` : "睡眠整理跳过（库空/进行中）或失败——详见 ~/.krystal/");
         renderStatus();
       });

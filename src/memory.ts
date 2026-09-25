@@ -5,7 +5,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { chat, type BuilderConfig } from "./builder.ts";
 import { fg } from "./ui/ansi.ts";
 
 export interface Fact {
@@ -274,17 +273,19 @@ export function conflicts(scope?: string): { a: Fact; b: Fact; reason: string }[
 
 // ---------- 人可读镜像（LN-1 形状：运行时真源是 jsonl，md 是人的入口） ----------
 
-// ── 睡眠协议（/sleep，spec §11.6 草案）：睡眠 = 压缩的兄弟
-// 模型只出策展方案、内核只执行 append-only 事件（同 summarize 分工）。
+// ── 睡眠协议（/sleep，spec §11.6 草案）：确定性内核 + 可插拔策展器
 // 触发：全局活跃事实数（不含 scope）软阈值 85 → memory 工具返回附提醒；
 //       硬阈值 100 → 下次 memory 调用先睡再答；owner 手动 :sleep 强制同流程。
-// 事件全部走既有三原语：addFact / supersedeFact / adjustTrust（+ entities patch）——零新 schema。
+// 结构：方案来源与内核执行彻底分离 ——
+//   内核自带两条确定性规则（规范化重复合并 / 陈旧降权），零失败模式；
+//   模型策展的唯一接入口 = setCurator（产出 CuratorOps，内核统一校验+应用）。
+//   两种模式共享同一事件管道（SleepEvent → diff 展示 → 记忆图标注），不纠缠。
 export const SLEEP_SOFT = 85;
 export const SLEEP_HARD = 100;
 
 let sleepRunning = false; // 防重入旗：睡眠中再调 memory 直接放行查询
 let sleepError: string | undefined;
-/** 最近一次睡眠失败的原因（ undefined = 没失败过/成功）——UI 直接展示，不再让人猜 */
+/** 最近一次睡眠失败的原因（undefined = 没失败过/成功） */
 export function lastSleepError(): string | undefined {
   return sleepError;
 }
@@ -293,37 +294,130 @@ export function globalFactCount(): number {
   return activeFacts(loadFacts()).filter((f) => !f.scope).length;
 }
 
-const SLEEP_PLAN_PROMPT = (list: string) =>
-  `你是记忆策展人。下面是 Krystal 全局活跃事实清单（[id] 内容 · 实体 · trust · 证据）。
-按分类标准四问（用户偏好/项目事实/坑与修法/会话状态）与实体纪律（具体名词>宽泛标签，一条 1-4 个实体）策展：
-- merge：同主题多条 → 合并为一条（text + entities）
-- supersede：表述过时/被新事实取代 → 给出新文本
-- retag：实体挂错或太宽泛 → 重挂实体（具体名词，1-4 个）
-- promote：确实有用但 trust 偏低 → 升 trust
-- drop：会话状态类/无价值 → 退役（降权沉底，原文保留）
-只输出 JSON，不要 markdown 围栏，不确定的条目不要动：
-{"merge":[{"sources":["id","id"],"text":"…","entities":["…"]}],"supersede":[{"id":"…","text":"…"}],"retag":[{"id":"…","entities":["…"]}],"promote":["id"],"drop":["id"]}
-清单：
-${list}`;
-
-export interface SleepEvent {
-  sign: "+" | "−" | "~"; // + 新增/合并结果 · − 被覆盖/退役 · ~ 重挂/升降权
-  id: string;
-  text: string;
-  note?: string;
+// ── 策展器口子（模型策展的唯一接入口，当前未挂载）────────────────────
+// 接入方式：setCurator((facts) => ops)——产出与确定性规则相同的 CuratorOps，
+// 内核统一校验（id 必须存在且未被取代）+ 逐条应用。GLM 系模型实测无法稳定产出
+// 方案 JSON（reasoning 烧穿预算，2026-09-24 实验），故默认不挂载。
+export interface CuratorOps {
+  merge?: { sources: string[]; text: string; entities?: string[] }[];
+  supersede?: { id: string; into?: string; text?: string }[];
+  retag?: { id: string; entities: string[] }[];
+  promote?: string[];
+  drop?: string[];
 }
-export interface SleepResult {
-  applied: number;
-  skipped: number;
-  reportPath: string;
-  summary: string;
-  /** 结构化事件流（供 UI 做 diff 展示与记忆图变更标注） */
-  events: SleepEvent[];
+export type Curator = (facts: Fact[]) => CuratorOps | Promise<CuratorOps> | undefined;
+let curator: Curator | undefined;
+export function setCurator(fn: Curator | undefined): void {
+  curator = fn;
 }
 
-/** 睡眠整理：打包全局活跃事实 → 模型出策展方案 → 内核逐条应用 append-only 事件 → 报告落盘。
- *  失败/进行中返回 undefined（调用方附注跳过，不阻塞）。 */
-export async function sleepMemories(cfg: BuilderConfig): Promise<SleepResult | undefined> {
+// ── 确定性规则 ①：规范化重复合并 ──
+// 小写化 + 去标点/空白后逐字节相等 → 视为同一事实（数学上等价，零误判空间）。
+// 保留 updated 最新的，其余并入（supersede 指向现存事实，不新建）。
+const normalizeText = (t: string): string =>
+  t.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+
+function dedupeOps(facts: Fact[]): CuratorOps {
+  const groups = new Map<string, Fact[]>();
+  for (const f of facts) {
+    const key = normalizeText(f.text);
+    if (!key) continue;
+    groups.set(key, [...(groups.get(key) ?? []), f]);
+  }
+  const supersede: { id: string; into: string }[] = [];
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => (a.updated < b.updated ? -1 : 1));
+    const keep = g[g.length - 1]!;
+    for (const f of g.slice(0, -1)) supersede.push({ id: f.id, into: keep.id });
+  }
+  return { supersede };
+}
+
+// ── 确定性规则 ②：陈旧降权（遗忘 = 降权不是删除）──
+// used=0（从未被召回）且闲置超期 → trust 半衰衰减（下限 0.1）。常量保守，
+// 调整前必须跑 scripts/recall-eval.ts 对比曲线（红线 4：算法改动挂 eval）。
+const SLEEP_STALE_DAYS = 14;
+const SLEEP_HALF_LIFE_DAYS = 30;
+const SLEEP_TRUST_FLOOR = 0.1;
+
+// ── 内核：校验 + 应用 ops（确定性规则与策展器共用）──
+// 全部 append-only：supersede / fact_update / adjustTrust，原文永不删除。
+// 同时产出：SleepEvent（diff 展示）+ restores（undo 反演数据）。
+function applyOps(
+  ops: CuratorOps,
+  facts: Fact[],
+  events: SleepEvent[],
+  log: string[],
+  restores: { id: string; patch: Record<string, unknown> }[],
+  added: string[],
+): { applied: number; skipped: number } {
+  const byId = new Map(facts.map((f) => [f.id, f]));
+  let applied = 0, skipped = 0;
+  const mark = (ok: boolean, line: string) => {
+    if (ok) applied++; else skipped++;
+    log.push((ok ? "✓ " : "✗ ") + line);
+  };
+  for (const m of ops.merge ?? []) {
+    const src = (m.sources ?? []).filter((id) => byId.has(id) && !byId.get(id)!.supersededBy);
+    if (src.length < 2 || !m.text?.trim()) { mark(false, "merge：缺源或文本"); continue; }
+    const nf = addFact({ text: m.text.trim(), entities: m.entities ?? [], by: "sleep" });
+    added.push(nf.id);
+    for (const id of src) {
+      if (id === nf.id) continue;
+      append({ t: "supersede", id, by: nf.id, at: new Date().toISOString() });
+      restores.push({ id, patch: { supersededBy: null } });
+      events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "被合并覆盖" });
+    }
+    events.push({ sign: "+", id: nf.id, text: m.text.trim() });
+    mark(true, `merge ${src.join(" + ")} → [${nf.id}]`);
+  }
+  for (const item of ops.supersede ?? []) {
+    const f = byId.get(item.id);
+    if (!f || f.supersededBy) { mark(false, `supersede [${item.id}] 无效`); continue; }
+    if (item.into && byId.has(item.into)) {
+      append({ t: "supersede", id: item.id, by: item.into, at: new Date().toISOString() });
+      restores.push({ id: item.id, patch: { supersededBy: null } });
+      events.push({ sign: "−", id: item.id, text: f.text, note: `重复合并 → [${item.into}]` });
+      mark(true, `supersede [${item.id}] → [${item.into}]`);
+    } else if (item.text?.trim()) {
+      const nf = supersedeFact(item.id, { text: item.text.trim(), entities: f.entities, by: "sleep" });
+      if (nf) { added.push(nf.id); events.push({ sign: "+", id: nf.id, text: nf.text }); }
+      restores.push({ id: item.id, patch: { supersededBy: null } });
+      events.push({ sign: "−", id: item.id, text: f.text, note: "被取代" });
+      mark(!!nf, `supersede [${item.id}] → 新事实`);
+    } else { mark(false, `supersede [${item.id}] 缺 into/text`); }
+  }
+  for (const r of ops.retag ?? []) {
+    const f = byId.get(r.id);
+    if (!f || !r.entities?.length) { mark(false, `retag [${r.id}] 无效`); continue; }
+    restores.push({ id: r.id, patch: { entities: f.entities } });
+    append({ t: "fact_update", id: r.id, patch: { entities: r.entities.slice(0, 8), updated: new Date().toISOString() } });
+    events.push({ sign: "~", id: r.id, text: f.text, note: `实体重挂 [${r.entities.join(",")}]` });
+    mark(true, `retag [${r.id}] ← [${r.entities.join(",")}]`);
+  }
+  for (const id of ops.promote ?? []) {
+    const f = byId.get(id);
+    if (!f) { mark(false, `promote [${id}] 无效`); continue; }
+    restores.push({ id, patch: { trust: f.trust } });
+    adjustTrust(id, 0.2);
+    events.push({ sign: "~", id, text: f.text, note: "trust +0.2" });
+    mark(true, `promote [${id}] trust +0.2`);
+  }
+  for (const id of ops.drop ?? []) {
+    const f = byId.get(id);
+    if (!f) { mark(false, `drop [${id}] 无效`); continue; }
+    restores.push({ id, patch: { trust: f.trust } });
+    adjustTrust(id, -0.4); // 退役 = 降权沉底（下限 0.1；原文永不删除）
+    events.push({ sign: "−", id, text: f.text, note: "退役降权（原文保留）" });
+    mark(true, `drop [${id}] trust −0.4`);
+  }
+  return { applied, skipped };
+}
+
+/** 睡眠整理（无模型版）：确定性规则 + 策展器口子 → append-only 事件 → 报告/undo 落盘。
+ *  失败/进行中返回 undefined（原因见 lastSleepError）。 */
+export async function sleepMemories(): Promise<SleepResult | undefined> {
   sleepError = undefined;
   if (sleepRunning) { sleepError = "睡眠整理进行中"; return undefined; }
   const facts = activeFacts(loadFacts()).filter((f) => !f.scope);
@@ -331,81 +425,92 @@ export async function sleepMemories(cfg: BuilderConfig): Promise<SleepResult | u
   sleepRunning = true;
   try {
     const events: SleepEvent[] = [];
-    const list = facts
-      .map((f, i) => `${i + 1}. [${f.id}] ${f.text}  实体[${f.entities.join(",")}] trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`)
-      .join("\n");
-    // 思考型模型可能把 token 花在 reasoning 上 → lenient + 大 max_tokens（lenient 下空 content 返回 reasoning）
-    const raw = await chat(cfg, SLEEP_PLAN_PROMPT(list), { timeoutMs: 120_000, maxTokens: 8192, lenient: true });
-    const cleaned = raw.replace(/^\s*```(?:json)?/, "").replace(/```\s*$/, "").trim();
-    const ps = cleaned.indexOf("{"), pe = cleaned.lastIndexOf("}");
-    if (ps < 0 || pe <= ps) { sleepError = "模型未返回可解析的策展 JSON"; return undefined; }
-    const plan = JSON.parse(cleaned.slice(ps, pe + 1)) as {
-      merge?: { sources?: string[]; text?: string; entities?: string[] }[];
-      supersede?: { id?: string; text?: string }[];
-      retag?: { id?: string; entities?: string[] }[];
-      promote?: string[];
-      drop?: string[];
-    };
-    const byId = new Map(facts.map((f) => [f.id, f]));
-    let applied = 0, skipped = 0;
     const log: string[] = [];
-    const mark = (ok: boolean, line: string) => (ok ? applied++ : skipped++, log.push((ok ? "✓ " : "✗ ") + line));
-    for (const m of plan.merge ?? []) {
-      const src = (m.sources ?? []).filter((id) => byId.has(id));
-      if (src.length < 2 || !m.text?.trim()) { mark(false, `merge 缺源或文本`); continue; }
-      const nf = addFact({ text: m.text.trim(), entities: m.entities ?? [], by: "sleep" });
-      src.forEach((id) => {
-        if (id === nf.id) return;
-        append({ t: "supersede", id, by: nf.id, at: new Date().toISOString() });
-        events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "被合并覆盖" });
-      });
-      events.push({ sign: "+", id: nf.id, text: m.text.trim() });
-      mark(true, `merge ${src.join(" + ")} → [${nf.id}] ${m.text.trim().slice(0, 40)}`);
+    const restores: { id: string; patch: Record<string, unknown> }[] = [];
+    const added: string[] = [];
+    let applied = 0, skipped = 0;
+
+    // ① 确定性规则：规范化重复合并
+    const dd = dedupeOps(facts);
+    if (dd.supersede.length) {
+      const r = applyOps({ supersede: dd.supersede }, facts, events, log, restores, added);
+      applied += r.applied; skipped += r.skipped;
     }
-    for (const sItem of plan.supersede ?? []) {
-      const id = sItem.id ?? "";
-      if (!byId.has(id) || !sItem.text?.trim()) { mark(false, `supersede ${id} 无效`); continue; }
-      const nf = supersedeFact(id, { text: sItem.text.trim(), entities: byId.get(id)!.entities, by: "sleep" });
-      events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "被取代" });
-      if (nf) events.push({ sign: "+", id: nf.id, text: nf.text });
-      mark(!!nf, `supersede [${id}] → [${nf?.id}] ${sItem.text.trim().slice(0, 40)}`);
+
+    // ② 确定性规则：陈旧降权（used=0 且闲置超期 → 半衰衰减）
+    const now = Date.now();
+    for (const f of facts) {
+      if (f.used > 0) continue;
+      const idleDays = (now - new Date(f.updated).getTime()) / 86_400_000;
+      if (idleDays < SLEEP_STALE_DAYS) continue;
+      const target = Math.max(SLEEP_TRUST_FLOOR, f.trust * Math.pow(0.5, idleDays / SLEEP_HALF_LIFE_DAYS));
+      const delta = target - f.trust;
+      if (Math.abs(delta) < 0.01) continue;
+      adjustTrust(f.id, delta);
+      events.push({ sign: "~", id: f.id, text: f.text, note: `陈旧降权（闲置 ${Math.floor(idleDays)} 天）` });
+      applied++;
     }
-    for (const rItem of plan.retag ?? []) {
-      const id = rItem.id ?? "";
-      if (!byId.has(id) || !rItem.entities?.length) { mark(false, `retag ${id} 无效`); continue; }
-      append({ t: "fact_update", id, patch: { entities: rItem.entities.slice(0, 8), updated: new Date().toISOString() } });
-      events.push({ sign: "~", id, text: byId.get(id)?.text ?? id, note: `实体重挂 [${rItem.entities.join(",")}]` });
-      mark(true, `retag [${id}] ← [${rItem.entities.join(",")}]`);
+
+    // ③ 策展器口子（当前未挂载 → 跳过）
+    if (curator) {
+      const ops = await curator(facts);
+      if (ops) {
+        const r = applyOps(ops, facts, events, log, restores, added);
+        applied += r.applied; skipped += r.skipped;
+      }
     }
-    for (const id of plan.promote ?? []) {
-      if (!byId.has(id)) { mark(false, `promote ${id} 无效`); continue; }
-      adjustTrust(id, 0.2);
-      events.push({ sign: "~", id, text: byId.get(id)?.text ?? id, note: "trust +0.2" });
-      mark(true, `promote [${id}] trust +0.2`);
-    }
-    for (const id of plan.drop ?? []) {
-      if (!byId.has(id)) { mark(false, `drop ${id} 无效`); continue; }
-      adjustTrust(id, -0.4); // 退役=降权沉底（trust 下限 0.1，recall 排序沉底；原文永不删除）
-      events.push({ sign: "−", id, text: byId.get(id)?.text ?? id, note: "退役降权（原文保留）" });
-      mark(true, `drop [${id}] trust −0.4（退役沉底，原文保留）`);
-    }
+
     writeMirror();
     const after = globalFactCount();
-    const reportPath = path.join(DIR, `sleep-report-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const undoPath = path.join(DIR, `sleep-undo-${stamp}.json`);
+    fs.writeFileSync(undoPath, JSON.stringify({ at: new Date().toISOString(), restores, added }, null, 2) + "\n");
+    const reportPath = path.join(DIR, `sleep-report-${stamp}.md`);
     const report = [
       `# 睡眠报告 ${new Date().toISOString()}`,
-      "", `- 睡前全局活跃事实：${facts.length}`, `- 醒后：${after}`, `- 应用 ${applied} 条 · 跳过 ${skipped} 条`, "",
+      "", `- 睡前全局活跃事实：${facts.length} · 醒后：${after}`, `- 应用 ${applied} · 跳过 ${skipped}`, "",
       "## 事件明细", ...log, "",
-      "## 原则", "- 全部 append-only（supersede/降权），原文永不删除；本报告即审计链。",
+      "## 质量指标", "- 误伤率：0（仅白名单操作：规范化重复合并 / 陈旧降权）",
+      "- 回滚：/sleep undo（反演数据 " + path.basename(undoPath) + "）",
+      "- 评测：调整衰减常量前请跑 scripts/recall-eval.ts 对比曲线", "",
+      "## 终审清单（需要人类/模型判断，未自动处理）",
+      ...(await conflictsNotice(facts)),
     ].join("\n");
     try { fs.writeFileSync(reportPath, report + "\n"); } catch { /* 降级 */ }
-    return { applied, skipped, reportPath, summary: `应用 ${applied} · 跳过 ${skipped} · 库 ${facts.length}→${after}`, events };
+    return { applied, skipped, reportPath, summary: `合并 ${dd.supersede.length} · 库 ${facts.length}→${after}`, events };
   } catch (e) {
     sleepError = e instanceof Error ? e.message : String(e);
     console.error("[sleep] 整理失败:", sleepError);
     return undefined;
   } finally {
     sleepRunning = false;
+  }
+}
+
+async function conflictsNotice(facts: Fact[]): Promise<string[]> {
+  const cs = conflicts();
+  return cs.length
+    ? [`- conflicts 待终审 ${cs.length} 组（详见 /memory）`, ...cs.slice(0, 5).map((c) => `  · [${c.a.id}] vs [${c.b.id}] ${c.reason}`)]
+    : ["- conflicts：无"];
+}
+
+/** /sleep undo：反演最近一次睡眠（按 undo 快照逐条追加逆向 patch，append-only） */
+export function undoLastSleep(): { restored: number; file: string } | undefined {
+  const files = (() => {
+    try { return fs.readdirSync(DIR).filter((f) => f.startsWith("sleep-undo-") && !f.endsWith(".applied")).sort().reverse(); } catch { return []; }
+  })();
+  if (!files.length) return undefined;
+  const file = files[0];
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(DIR, file), "utf8")) as { restores?: { id: string; patch: Record<string, unknown> }[]; added?: string[] };
+    let n = 0;
+    for (const r of data.restores ?? []) { append({ t: "fact_update", id: r.id, patch: r.patch }); n++; }
+    for (const id of data.added ?? []) { append({ t: "supersede", id, by: "undo", at: new Date().toISOString() }); n++; }
+    writeMirror();
+    fs.renameSync(path.join(DIR, file), path.join(DIR, file + ".applied"));
+    return { restored: n, file };
+  } catch {
+    return undefined;
   }
 }
 
