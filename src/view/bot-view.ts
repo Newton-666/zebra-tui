@@ -66,6 +66,9 @@ const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidt
 
 /** 与主 app 同源：pi-tui 的 Editor 自己画上下两条线，颜色由 borderColor 决定（重画会被渲染层吃掉） */
 export const EDITOR_THEME: EditorTheme = { borderColor: (s: string) => fg(BLUE, s), selectList: THEME };
+/** 补全列表一屏显示几条（pi 默认值：autocompleteMaxVisible ?? 5，pi 里是 /settings 可调项，范围 3-20）
+ *  剩下的靠 ↑↓ 滚动，列表底部自带位置指示 `(3/10)`（pi-tui SelectList 内置，不用自己画） */
+export const AUTOCOMPLETE_MAX_VISIBLE = 5;
 
 const rule = (w: number, color = "36") => fg(color, "─".repeat(Math.max(0, w - 2)));
 
@@ -398,8 +401,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   const transcript = new Transcript();
   const scroll = new ScrollView(transcript, { follow: "end", scrollbar: "auto", overscroll: "contain" });
-  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 12 });
+  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: AUTOCOMPLETE_MAX_VISIBLE });
   // 输入 `/`（或 `:`）即弹出全部命令（与 pi 同款：pi-tui 的 SelectList，命令表见 ui/commands.ts）
+  // 一屏只列 AUTOCOMPLETE_MAX_VISIBLE 条，其余 ↑↓ 滚动（与 pi 同款，不像铺满屏占地方）
   editor.setAutocompleteProvider(new CommandProvider());
   const clearEditor = () => editor.setText("");
 

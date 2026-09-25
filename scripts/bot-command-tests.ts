@@ -114,23 +114,29 @@ const complete = (line: string, value: string, prefix: string) => {
 // 用真实 pi-tui Editor + 真实 EDITOR_THEME（顺带验证主题里配了 selectList —— 否则下拉渲染会抛）
 {
   const { Editor } = await import("../deps/pi-tui/dist/index.js");
-  const { EDITOR_THEME } = await import("../src/view/bot-view.ts");
+  const { EDITOR_THEME, AUTOCOMPLETE_MAX_VISIBLE } = await import("../src/view/bot-view.ts");
   const stub = { requestRender() {}, terminal: { rows: 40, cols: 100 } };
-  const submitted: string[] = [];
-  const editor = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: 12 });
-  editor.setAutocompleteProvider(new CommandProvider());
-  editor.focused = true;
-  editor.onSubmit = (t: string) => submitted.push(t);
-  const rows = () => editor.render(70).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
   const settle = () => new Promise((r) => setTimeout(r, 30)); // 等 debounce + 异步 getSuggestions
+  const mkEditor = () => {
+    const ed = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: AUTOCOMPLETE_MAX_VISIBLE });
+    ed.setAutocompleteProvider(new CommandProvider());
+    ed.focused = true;
+    return ed;
+  };
+  const strip = (l: string) => l.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
+  const isItem = (l: string) => BOT_COMMANDS.some((c) => new RegExp(`^\\s*(→\\s+)?${c.name}\\b`).test(l));
 
+  // 一屏只列 N 条（pi 同款：autocompleteMaxVisible ?? 5），其余靠 ↑↓ 滚动 + 底部位置指示
+  const editor = mkEditor();
+  const submitted: string[] = [];
+  editor.onSubmit = (t) => submitted.push(t);
   editor.handleInput("/");
   await settle();
-  assert.equal(
-    rows().filter((l) => BOT_COMMANDS.some((c) => new RegExp(`^\\s*(→\\s+)?${c.name}\\b`).test(l))).length,
-    BOT_COMMANDS.length,
-    "打 / 应弹出全部命令",
-  );
+  const rows = () => editor.render(70).map(strip);
+  assert.equal(rows().filter(isItem).length, AUTOCOMPLETE_MAX_VISIBLE, "一屏只显示 autocompleteMaxVisible 条（不铺满屏占地）");
+  assert.ok(AUTOCOMPLETE_MAX_VISIBLE < BOT_COMMANDS.length, "命令数应多于一屏，否则测不到滚动");
+  assert.ok(rows().some((l) => /\(1\/\d+\)/.test(l)), "底部有位置指示（当前/总数）");
+  assert.ok(!rows().filter(isItem).some((l) => /\bhelp\b/.test(l)), "列表末尾不在首屏（靠滚动看）");
   assert.ok(rows().some((l) => l.includes("→")), "默认选中第一项（↑↓ 可移动）");
 
   for (const ch of "sl") editor.handleInput(ch);
@@ -141,14 +147,23 @@ const complete = (line: string, value: string, prefix: string) => {
   await settle();
   assert.deepEqual(submitted, ["/sleep"], "enter 补全为 /sleep 并立即执行（与 pi 同款：行首 / 的补全确认后直接提交）");
 
+  // ↓ 滚动到底：末尾命令可见，位置指示跟着走
+  const scroller = mkEditor();
+  scroller.handleInput("/");
+  await settle();
+  for (let i = 0; i < BOT_COMMANDS.length - 1; i++) scroller.handleInput("\x1b[B");
+  await settle();
+  const srows = scroller.render(70).map(strip);
+  assert.ok(srows.filter(isItem).length === AUTOCOMPLETE_MAX_VISIBLE, "滚动后仍是同样的一屏高度");
+  assert.ok(srows.filter(isItem).some((l) => /\bhelp\b/.test(l)), "↓ 滚动后能看到列表末尾");
+  assert.ok(srows.some((l) => new RegExp(`\\(${BOT_COMMANDS.length}/${BOT_COMMANDS.length}\\)`).test(l)), "位置指示跟到末尾");
+
   // 普通消息里的路径不得弹列表（渲染高度 3 = 上下两条线 + 1 行文本）
-  const e2 = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: 12 });
-  e2.setAutocompleteProvider(new CommandProvider());
-  e2.focused = true;
+  const e2 = mkEditor();
   for (const ch of "看看 /etc/hosts 里") e2.handleInput(ch);
   await settle();
   assert.equal(e2.render(70).length, 3, "消息含路径时不弹命令列表");
-  console.log("7) 真实 Editor 接线（/ 弹列表 · 模糊过滤 · enter 执行 · 路径不扰）✓");
+  console.log("7) 真实 Editor 接线（/ 一屏 N 条 + 位置指示 + ↑↓ 滚动 · 模糊过滤 · enter 执行 · 路径不扰）✓");
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
