@@ -31,8 +31,6 @@ const DIR = path.join(os.homedir(), ".krystal");
 const FACTS = path.join(DIR, "facts.jsonl");
 const MIRROR = path.join(DIR, "MEMORY.md");
 
-export const factsPath = () => FACTS;
-export const mirrorPath = () => MIRROR;
 
 const rid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 

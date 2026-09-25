@@ -13,7 +13,6 @@ const MIN = 4_000;
 const MAX = 4_000_000;
 
 export const assumedWindow = 128_000;
-export const windowsPath = (): string => FILE;
 
 let cache: Record<string, number> | undefined;
 
