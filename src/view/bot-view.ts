@@ -897,6 +897,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       // pi-tui 自带 trimPartialClosingFences 处理未闭合代码围栏）。完成后原地定格，不再替换。
       streamMd = new Markdown("", 1, 0, BOT_THEME);
       streamMdDone = false;
+      streamMdText = ""; // 每段从零累积（工具调用分隔的多段回答，各段独立）
       const wrapper: Component = {
         get volatile() {
           return !streamMdDone; // 流式中逐帧重渲；完成后恢复缓存
@@ -1050,12 +1051,13 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         // 活 Markdown 已流式渲染完毕 → 原地定格（volatile 关闭 → 转入缓存），不再替换。
         // e.text 是权威全文（流式尾部可能有 trim 差异）→ setText 校准一次。
         streamMdDone = true;
-        if (streamMd) streamMd.setText(e.text.trim());
+        // 空最终文本 ≠ 没有内容：答案可能在工具调用前已流式给出（先答后记）→ 保留流式内容
+        if (streamMd && e.text.trim()) streamMd.setText(e.text.trim());
         const wrapper = streamItem; // 先留引用：closeStream 会清空变量
         closeStream();
         state = "完成";
-        if (!e.text.trim() && wrapper) {
-          // 空回答：移除空活组件
+        if (!e.text.trim() && !streamMdText.trim() && wrapper) {
+          // 真正空回答（流式也没内容）→ 移除空活组件
           const idx = transcript.items.indexOf(wrapper);
           if (idx >= 0) transcript.items.splice(idx, 1);
           transcript.forget(wrapper);
