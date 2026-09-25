@@ -12,6 +12,7 @@
     "smoke": "KRISTAL_SESSIONS_DIR=/tmp/krystal-test-sessions node --experimental-strip-types --no-warnings scripts/smoke.ts",
     "test:memory": "node --experimental-strip-types --no-warnings scripts/memory-tests.ts",
     "test:render": "node --experimental-strip-types --no-warnings scripts/bot-render-tests.ts",
-    "test:commands": "node --experimental-strip-types --no-warnings scripts/bot-command-tests.ts"
+    "test:commands": "node --experimental-strip-types --no-warnings scripts/bot-command-tests.ts",
+    "test:divert": "node --experimental-strip-types --no-warnings scripts/bot-divert-tests.ts"
   }
 }

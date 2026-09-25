@@ -41,6 +41,17 @@ import {
 } from "../session.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
 import { CommandProvider, commandNames, helpLines } from "../ui/commands.ts";
+import {
+  appendDivertEvent,
+  createDivert,
+  divertContext,
+  divertEvents,
+  listDiverts,
+  settleStaleDiverts,
+  toDivertEvent,
+  updateDivert,
+} from "../divert.ts";
+import { SubsessionBlock, createDivertPrompt } from "./subsession.ts";
 import { createTextSegment, type TextSegment } from "./stream-seg.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
@@ -145,8 +156,8 @@ export class UserBlock implements Component {
 //    pending：●↔○ 冰蓝闪烁（600ms 相位，工作计时器驱动）· ok：蓝点 · denied/error：玫点
 //    展开：仅 edit_file 出 diff（旧行玫、新行绿，全 dim，上限 6 行）；write_file 给 +N 行；
 //    run_command 给前 2 行输出；read_file/list_dir 只有一行（内容本来就在编辑器里）
-const DOT_PEND = "38;5;117";
-const DOT_ROSE = "38;5;218";
+export const DOT_PEND = "38;5;117";
+export const DOT_ROSE = "38;5;218";
 const DIFF_ADD = "38;5;71";
 const DIFF_DEL = "38;5;218";
 let toolBlink = false; // 由工作计时器翻转（每 4 tick = 600ms）
@@ -387,7 +398,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   const transcript = new Transcript();
   const scroll = new ScrollView(transcript, { follow: "end", scrollbar: "auto", overscroll: "contain" });
-  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 8 });
+  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 12 });
   // 输入 `/`（或 `:`）即弹出全部命令（与 pi 同款：pi-tui 的 SelectList，命令表见 ui/commands.ts）
   editor.setAutocompleteProvider(new CommandProvider());
   const clearEditor = () => editor.setText("");
@@ -440,7 +451,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   let state = cfg ? "空闲" : "未配置";
   let turnThinking = ""; // 本回合累积的思考原文（落盘 + /resume 重放）
   let tokens = 0;
-  const abort = new AbortController();
+  // 主会话的中断控制器：**每回合重建**（AbortController 一旦 abort 就永久失效，
+  // 旧写法全局只建一次 → esc 每个进程只能中断第一次，之后再按都不生效）
+  let abort = new AbortController();
 
   let modelLine = cfg ? `${cfg.model}` : "未配置 API——对话内 /login 配置（与平台共用）";
   const applyModelChange = (model: string, note: string): void => {
@@ -464,8 +477,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   /** 从事件流重建对话区（新会话为空；/resume 切换会话时复用） */
   const rebuild = (id: string) => {
     const toolById = new Map<string, ToolBlock>();
-    const evs = loadEvents(id);
-    const intro = evs.find((e) => e.t === "intro");
+    const evs = loadEvents(id);    const intro = evs.find((e) => e.t === "intro");
     const meta = loadBotMeta(id);
     if (intro && intro.t === "intro") {
       transcript.items.push(...pushIntro(cfg?.model ?? intro.model, intro.cwd), "");
@@ -474,6 +486,19 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       transcript.items.push(...pushIntro(cfg?.model ?? meta.model, meta.cwd), "");
       appendEvent(id, { t: "intro", at: new Date().toISOString(), cwd: meta.cwd, model: meta.model, tier: meta.tier });
     }
+    // ── 旁路块：按 afterSeq **原位插回**（进程被杀遗留的 running → 判为中断，不猜内容）
+    settleStaleDiverts(id);
+    const pending = listDiverts(id);
+    const flushDiverts = (processed: number) => {
+      while (pending.length > 0 && pending[0]!.afterSeq <= processed) {
+        const d = pending.shift()!;
+        const b = new SubsessionBlock({ id: d.id, task: d.task });
+        b.loadFrom(divertEvents(id, d.id));
+        b.setStatus(d.status);
+        transcript.items.push(b, "");
+      }
+    };
+    let seq = 0;
     for (const e of evs) {
       if (e.t === "msg" && e.role === "user") transcript.items.push(new UserBlock(e.content), "");
       else if (e.t === "msg" && e.role === "assistant") {
@@ -483,19 +508,23 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           tb.append(e.thinking);
           transcript.items.push(tb, "");
         }
+        // 顺序与直播一致：先说（中段答复）再调工具
+        if (e.content.trim()) transcript.items.push(new Markdown(e.content, 1, 0, BOT_THEME), "");
         if (e.toolCalls?.length) {
           for (const tc of e.toolCalls) {
             const b = new ToolBlock(tc.name, tc.args);
             toolById.set(tc.id, b);
             transcript.items.push(b);
           }
-        } else if (e.content.trim()) transcript.items.push(new Markdown(e.content, 1, 0, BOT_THEME), "");
+        }
       } else if (e.t === "msg" && e.role === "tool") {
         const b = e.toolCallId ? toolById.get(e.toolCallId) : undefined;
         const denied = e.content.startsWith("[策略闸门拒绝]");
         b?.setResult(!denied, denied, e.content.replace(/^\[策略闸门拒绝\] /, ""));
       }
+      flushDiverts(++seq);
     }
+    flushDiverts(evs.length);
   };
   if (resumed) rebuild(sessionId);
   else {
@@ -505,6 +534,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   }
   /** 回溯历史（/resume）：清空对话区并重放所选会话 */
   const resumeSession = (id: string) => {
+    abortMain(); // 切走前级联中断旁路：否则它们会往旧会话目录里写事件
+    runningDiverts.clear();
     sessionId = id;
     transcript.items = [];
     transcript.invalidate();
@@ -632,6 +663,85 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       invalidate: () => input.invalidate(),
     };
     openOverlay(panel, 64);
+  };
+
+  // ── 旁路会话（/divert）：人按的一次性派发
+  //    定位：输入框永远属于主会话；主会话的 prompt / 工具清单 / events **完全不知道它存在**（连 append 都不做）。
+  //    上下文：主会话前缀（按引用切片，不复制）⊕ 自己的 delta → 首次调用命中前缀缓存（见 divert.ts）
+  //    渲染：块 + 嵌套 Transcript，与主会话流状态完全隔离（见 view/subsession.ts）
+  const runningDiverts = new Map<string, { block: SubsessionBlock; abort: AbortController }>();
+
+  /** 主会话终结的**唯一出口**：esc / /new / /resume 切走 / ctrl+c 退出 都必须走它 —— 否则会留下孤儿旁路 */
+  const abortMain = (): void => {
+    abort.abort();
+    for (const { abort: a } of runningDiverts.values()) a.abort();
+  };
+
+  /** /stop：只中断旁路（主会话不受影响） */
+  const stopDiverts = (): void => {
+    const n = runningDiverts.size;
+    for (const { abort: a } of runningDiverts.values()) a.abort();
+    push(dim(n ? `  已中断 ${n} 个旁路会话` : "  当前没有在跑的旁路会话"), "");
+    refresh();
+  };
+
+  /** 派发一个旁路（task 来自弹窗，或 `/divert <任务>` 直接给） */
+  const dispatchDivert = (task: string): void => {
+    if (!cfg) return;
+    // 捕获父会话 id：之后用户可能 /new 或 /resume 切走，事件必须仍写回**派发时**的那个会话目录
+    const parent = sessionId;
+    const mainEvents = loadEvents(parent); // 前缀长度 = 重播插入位置（同一个数字，不加概念）
+    const d = createDivert({ parent, task, model: cfg.model, afterSeq: mainEvents.length });
+    appendDivertEvent(parent, d.id, { t: "msg", at: new Date().toISOString(), role: "user", content: task });
+    const block = new SubsessionBlock({ id: d.id, task, blink: () => toolBlink });
+    if (transcript.items.length > 0 && transcript.items[transcript.items.length - 1] !== "") push("");
+    transcript.items.push(block, "");
+    const ac = new AbortController();
+    runningDiverts.set(d.id, { block, abort: ac });
+    refresh();
+
+    let think = ""; // 本段思考（归属到下一个 assistant 事件，与主会话同规则）
+    const settle = (status: "done" | "aborted" | "failed") => {
+      updateDivert(parent, d.id, { status });
+      runningDiverts.delete(d.id);
+      refresh();
+    };
+    void runBotTask({
+      cfg,
+      cwd,
+      events: divertContext(parent, d.id), // 主会话前缀 ⊕ 自己（含刚写的任务）
+      signal: ac.signal,
+      onEvent: (e: BotEvent) => {
+        block.feedLive(e);
+        if (e.type === "thinking") think += e.delta; // 思考增量不单独落盘：随 assistant/final 一起存
+        const ev = toDivertEvent(e, { model: cfg.model, thinking: think });
+        if (ev) appendDivertEvent(parent, d.id, ev);
+        if (e.type === "assistant" || e.type === "final") think = "";
+        if (e.type === "final") settle("done");
+        else if (e.type === "error") settle(e.message.includes("已中断") ? "aborted" : "failed");
+        refresh();
+      },
+    });
+  };
+
+  /** /divert 弹窗：输入框上方的任务输入（内嵌编辑器，与主输入框同款两条浅蓝线） */
+  const openDivertPopup = (): void => {
+    if (!cfg) {
+      push(fg("31", " ✗ 未配置平台模型——先到 Platform model 配置"), "");
+      refresh();
+      return;
+    }
+    openOverlay(
+      createDivertPrompt(tui, {
+        theme: EDITOR_THEME,
+        onSubmit: (task: string) => {
+          closeOverlay();
+          dispatchDivert(task);
+        },
+        onCancel: closeOverlay,
+      }),
+      80,
+    );
   };
 
   /** /model：切 Krystal Bot 自己的模型（动态拉取；与平台搭建模型分离，只写 config.json 的 bot.model） */
@@ -820,7 +930,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const sid = sessionName ? `${sessionName}` : sessionId.replace(/^bot-/, "").slice(0, 15);
       const extra = `${foldCount ? `折叠 ${foldCount} · ` : ""}${summaryActive ? "摘要 有 · " : ""}`;
       const ctxText = cs.level === "ok" ? dim(cs.label) : cs.level === "fold" ? fg(BLUE_LIGHT, cs.label) : bold(fg(BLUE_LIGHT, `${cs.label} ▲`));
-      const seg = `${sid} · ${busy ? state : "空闲"} ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯 · /model 模型 · /login API`;
+      const divertText = runningDiverts.size > 0 ? ` · ${bold(fg(BLUE_LIGHT, `旁路 ${runningDiverts.size}`))}` : "";
+      const seg = `${sid} · ${busy ? state : "空闲"}${divertText} ${ctxText} · 缓存 ${cache} · ${pfx} · ${extra}${tok} · /resume 回溯 · /model 模型 · /login API`;
       return [truncateToWidth(` ${seg} ${dim("· esc 中断 · ctrl+c 退出")}`, w)];
     },
     invalidate(): void {},
@@ -1085,6 +1196,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     busy = true;
     state = "连接中";
     turnThinking = ""; // 新回合从零累积思考
+    abort = new AbortController(); // 每回合新开：否则上一回合的 abort 会让本轮无法中断
     // 每回合从事件流装配上下文：只追加、顺序稳定 → 前缀缓存友好（§13.2）
     const events = loadEvents(sessionId);
     checkPrefix(events.filter((e) => e.t === "msg"));
@@ -1092,10 +1204,11 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   };
 
   editor.onSubmit = (text: string) => {
-    if (busy || !cfg) return;
+    if (!cfg) return;
     const body = text.trim();
     if (!body) return;
-    // 命令前缀 / 与 : 等价（平台约定）；未知命令只提示，绝不发给模型
+    // 命令前缀 / 与 : 等价（平台约定）；未知命令只提示，绝不发给模型。
+    // 命令层在主会话忙时也接受：旁路要能在主会话跑着的时候派发（真并行）与 /stop。
     if (body.startsWith("/") || body.startsWith(":")) {
       const cmd = body.slice(1).trim().toLowerCase();
       clearEditor();
@@ -1113,6 +1226,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
       }
       else if (cmd === "new") {
+        abortMain(); // 开新会话前级联中断旁路（同 /resume）
+        runningDiverts.clear();
         sessionId = createBotSession({ cwd, model: cfg.model, tier: "写作者" }).id;
         transcript.items = [...pushIntro(cfg.model, cwd), ""];
         transcript.invalidate();
@@ -1180,6 +1295,13 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           refresh();
         });
         return;
+      } else if (cmd === "divert" || cmd.startsWith("divert ")) {
+        // 给任务→直接派发；只打命令→弹窗输入（两种都工作）
+        const task = body.replace(/^[/:]\s*divert\s*/i, "").trim();
+        if (task) dispatchDivert(task);
+        else openDivertPopup();
+      } else if (cmd === "stop") {
+        stopDiverts();
       } else if (cmd === "model") {
         openModelPicker();
         return;
@@ -1203,6 +1325,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       }
       return;
     }
+    if (busy) return; // 正文消息仍要求主会话空闲（命令层不受限）
     clearEditor();
     // pi 风格：消息以「整宽蓝色背景块」落入对话区（块后留一空行）
     push(new UserBlock(body), "");
@@ -1219,6 +1342,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     },
     handleInput(data: string): void {
       const quit = () => {
+        abortMain(); // 退出前级联中断旁路：绝不留孤儿（它还会跑命令、写文件、写记忆）
         tui.stop();
         finish();
       };
@@ -1231,15 +1355,20 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         tui.requestRender();
         return;
       }
+      // ctrl+o：折叠/展开旁路块（pi 同款惯例：app.tools.expand = ctrl+o）
+      if (matchesKey(data, "ctrl+o")) {
+        const blocks = transcript.items.filter((i): i is SubsessionBlock => i instanceof SubsessionBlock);
+        if (blocks.length > 0) {
+          const to = !blocks.some((b) => b.expanded); // 有折叠的 → 全展开；全展开 → 全收起
+          for (const b of blocks) if (b.expanded !== to) b.toggle();
+          refresh();
+          return;
+        }
+      }
       if (matchesKey(data, "escape")) {
-        if (false) {
-          // 兼容占位（已由上方 overlayKeys 处理）
-        }
-        if (busy) {
-          abort.abort(); // 中断当前生成（可继续输入）
-        } else {
-          quit();
-        }
+        // esc = 中断主会话 + 级联中断旁路（唯一出口）；主会话空闲但旁路在跑 → 只停旁路，不退出
+        if (busy || runningDiverts.size > 0) abortMain();
+        else quit();
         return;
       }
       editor.handleInput(data);

@@ -33,6 +33,12 @@ export const BOT_COMMANDS: BotCommand[] = [
   { name: "model", description: "切换模型（弹窗：来源 → 模型）" },
   { name: "login", description: "配置平台 API（Base URL / Key / 模型名）" },
   { name: "memory", aliases: ["mem"], description: "查看记忆图（统计 · 实体事实树 · 关联 · 矛盾）" },
+  {
+    name: "divert",
+    argumentHint: "<任务>",
+    description: "派发旁路会话（一次性；带主会话上下文出发，结论留在块里不进主上下文）",
+  },
+  { name: "stop", description: "中断全部在跑的旁路会话" },
   { name: "sleep", argumentHint: "[undo]", description: "记忆睡眠整理（undo 反演最近一次）" },
   { name: "help", description: "命令与快捷键" },
 ];

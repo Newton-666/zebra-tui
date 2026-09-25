@@ -117,7 +117,7 @@ const complete = (line: string, value: string, prefix: string) => {
   const { EDITOR_THEME } = await import("../src/view/bot-view.ts");
   const stub = { requestRender() {}, terminal: { rows: 40, cols: 100 } };
   const submitted: string[] = [];
-  const editor = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: 8 });
+  const editor = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: 12 });
   editor.setAutocompleteProvider(new CommandProvider());
   editor.focused = true;
   editor.onSubmit = (t: string) => submitted.push(t);
@@ -142,7 +142,7 @@ const complete = (line: string, value: string, prefix: string) => {
   assert.deepEqual(submitted, ["/sleep"], "enter 补全为 /sleep 并立即执行（与 pi 同款：行首 / 的补全确认后直接提交）");
 
   // 普通消息里的路径不得弹列表（渲染高度 3 = 上下两条线 + 1 行文本）
-  const e2 = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: 8 });
+  const e2 = new Editor(stub as never, EDITOR_THEME, { autocompleteMaxVisible: 12 });
   e2.setAutocompleteProvider(new CommandProvider());
   e2.focused = true;
   for (const ch of "看看 /etc/hosts 里") e2.handleInput(ch);

@@ -427,7 +427,7 @@ export type BotEvent =
   | { type: "final"; text: string }
   | { type: "error"; message: string };
 
-const SYSTEM = (cwd: string) => `你是 Krystal Bot——Krystal 平台的原生成员（写作者）。
+export const SYSTEM = (cwd: string) => `你是 Krystal Bot——Krystal 平台的原生成员（写作者）。
 工作目录：${cwd}
 规则：
 - 调工具前先用一句话说明意图；工具输出会由系统回填给你
