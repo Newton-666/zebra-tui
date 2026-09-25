@@ -973,7 +973,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     invalidate(): void {},
   };
   const workingTimer = setInterval(() => {
-    if (busy || sleeping) {
+    // 有旁路在跑时也要推进：否则「主会话空闲 + 旁路运行」下 toolBlink 冻住，旁路圆点不闪烁
+    // （workingComp 在 !busy 时 return []，所以放行这个条件不会多出任何可见行）
+    if (busy || sleeping || runningDiverts.size > 0) {
       workingTick++;
       toolBlink = Math.floor(workingTick / 4) % 2 === 1;
       tui.requestRender();
