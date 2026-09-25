@@ -40,6 +40,7 @@ import {
   trashSession,
 } from "../session.ts";
 import { runBotTask, type BotEvent } from "../bot.ts";
+import { CommandProvider, commandNames, helpLines } from "../ui/commands.ts";
 import { createTextSegment, type TextSegment } from "./stream-seg.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
@@ -53,7 +54,7 @@ const THEME = {
 const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
 
 /** 与主 app 同源：pi-tui 的 Editor 自己画上下两条线，颜色由 borderColor 决定（重画会被渲染层吃掉） */
-const EDITOR_THEME: EditorTheme = { borderColor: (s: string) => fg(BLUE, s) };
+export const EDITOR_THEME: EditorTheme = { borderColor: (s: string) => fg(BLUE, s), selectList: THEME };
 
 const rule = (w: number, color = "36") => fg(color, "─".repeat(Math.max(0, w - 2)));
 
@@ -386,7 +387,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
 
   const transcript = new Transcript();
   const scroll = new ScrollView(transcript, { follow: "end", scrollbar: "auto", overscroll: "contain" });
-  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 4 });
+  const editor = new Editor(tui, EDITOR_THEME, { autocompleteMaxVisible: 8 });
+  // 输入 `/`（或 `:`）即弹出全部命令（与 pi 同款：pi-tui 的 SelectList，命令表见 ui/commands.ts）
+  editor.setAutocompleteProvider(new CommandProvider());
   const clearEditor = () => editor.setText("");
 
   /** 内容变化后主动重算滚动视图布局：否则高度突变的那一帧会用旧高度 → 溢出、破坏输入框 */
@@ -1189,12 +1192,13 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         refresh();
       } else if (cmd === "help") {
         push(
-          dim("  /resume 回溯历史（选中后按两次 d 删除）· /name <名称> 命名会话 · /model 模型 · /login 配置 API · /memory 记忆图 · /sleep 睡眠整理 · /new 新会话 · esc 中断 · ctrl+c 退出"),
+          ...helpLines().map((l) => dim(l)),
+          dim("  esc 中断 · ctrl+c 退出 · 打 / 弹出命令列表（↑↓ 选择 · enter 执行）"),
           "",
         );
         refresh();
       } else {
-        push(dim(`  未知命令 ${body}（可用 /resume · /name · /model · /login · /memory · /sleep · /new · /help）`), "");
+        push(dim(`  未知命令 ${body}（可用 ${commandNames()}）`), "");
         refresh();
       }
       return;
