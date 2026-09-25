@@ -879,17 +879,44 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   };
 
   // 流动块：思考/回答各自一个多行组件，delta 原地增长
-  let streamItem: StreamText | undefined;
+  let streamItem: Component | undefined;
+  let streamMd: Markdown | undefined;
+  let streamMdText = "";
+  let streamMdDone = false;
   let streamKind: "thinking" | "text" | null = null;
   let currentTool: ToolBlock | undefined;
-  const beginStream = (prefix: string, style: (s: string) => string) => {
+  const beginStream = (prefix: string, style: (t: string) => string) => {
     if (streamKind) closeStream();
-    streamItem = new StreamText(prefix, style);
-    push(streamItem);
-    streamKind = prefix ? "thinking" : "text";
+    if (prefix) {
+      // 思考：dim 纯文本流（成本最低，观感与 pi 的 thinking 一致）
+      streamItem = new StreamText(prefix, style);
+      push(streamItem);
+      streamKind = "thinking";
+    } else {
+      // 回答：pi 同款——边流式边渲染真 Markdown（部分文本喂 Markdown，每帧重解析；
+      // pi-tui 自带 trimPartialClosingFences 处理未闭合代码围栏）。完成后原地定格，不再替换。
+      streamMd = new Markdown("", 1, 0, BOT_THEME);
+      streamMdDone = false;
+      const wrapper: Component = {
+        get volatile() {
+          return !streamMdDone; // 流式中逐帧重渲；完成后恢复缓存
+        },
+        render(wid: number): string[] {
+          return streamMd!.render(wid);
+        },
+        invalidate(): void {
+          streamMd?.invalidate();
+        },
+      };
+      streamItem = wrapper;
+      push(wrapper);
+      streamKind = "text";
+    }
   };
   const streamTo = (delta: string) => {
-    streamItem?.append(delta);
+    if (streamItem instanceof StreamText) streamItem.append(delta);
+    else if (streamMd) streamMd.setText((streamMdText + delta).replace(/\s+$/, ""));
+    streamMdText += delta;
     refresh();
   };
   const closeStream = () => {
@@ -1020,15 +1047,19 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         break;
       }
       case "final": {
-        // 流式原始行 → Markdown 渲染块（与 pi 的回答观感一致）
-        const streamed = streamItem; // 先留引用：closeStream 会清空
+        // 活 Markdown 已流式渲染完毕 → 原地定格（volatile 关闭 → 转入缓存），不再替换。
+        // e.text 是权威全文（流式尾部可能有 trim 差异）→ setText 校准一次。
+        streamMdDone = true;
+        if (streamMd) streamMd.setText(e.text.trim());
+        const wrapper = streamItem; // 先留引用：closeStream 会清空变量
         closeStream();
         state = "完成";
-        if (e.text.trim()) {
-          const idx = streamed ? transcript.items.indexOf(streamed) : -1;
+        if (!e.text.trim() && wrapper) {
+          // 空回答：移除空活组件
+          const idx = transcript.items.indexOf(wrapper);
           if (idx >= 0) transcript.items.splice(idx, 1);
-          if (streamed) transcript.forget(streamed); // 释放旧流式块的缓存（其内容由 Markdown 块接管）
-          push(new Markdown(e.text, 1, 0, BOT_THEME));
+          transcript.forget(wrapper);
+        } else {
           push("");
         }
         appendEvent(sessionId, { t: "msg", at: new Date().toISOString(), role: "assistant", content: e.text, thinking: turnThinking || undefined });
