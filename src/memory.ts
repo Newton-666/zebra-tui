@@ -28,6 +28,8 @@ type Line =
   | { t: "supersede"; id: string; by: string; at: string };
 
 const DIR = path.join(os.homedir(), ".krystal");
+export const factsPath = () => FACTS;      // 测试与人工检查用
+export const mirrorPath = () => MIRROR;
 const FACTS = path.join(DIR, "facts.jsonl");
 const MIRROR = path.join(DIR, "MEMORY.md");
 

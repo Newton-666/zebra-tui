@@ -112,17 +112,6 @@ const TOOLS: BotTool[] = [...READER_TOOLS, ...WRITER_TOOLS];
 
 // ---------- 终端闸门（黑名单 + 围栏 + 防误删，见 gate.ts） ----------
 
-const READONLY_FIRST = new Set(["pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "which"]);
-const GIT_READONLY_SUB = new Set(["status", "log", "diff", "show", "branch"]);
-
-export function commandAllowed(cmd: string): boolean {
-  const c = cmd.trim();
-  if (!c) return false;
-  if (/[;&|`$><]/.test(c)) return false; // 白名单不允许组合/重定向（第二层沙箱前的第一道闸）
-  const parts = c.split(/\s+/);
-  if (parts[0] === "git") return GIT_READONLY_SUB.has(parts[1] ?? "");
-  return READONLY_FIRST.has(parts[0]!);
-}
 
 const OUT_LIMIT = Number(process.env.KRYSTAL_TOOL_OUT_MAX ?? 16_000);
 const CMD_TIMEOUT_MS = Number(process.env.KRYSTAL_CMD_TIMEOUT_MS ?? 120_000);
