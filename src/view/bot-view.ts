@@ -20,7 +20,7 @@ import {
 } from "../../deps/pi-tui/dist/index.js";
 import { BG_BLUE, BLUE_LIGHT, bold, chip, dim, fg } from "../ui/ansi.ts";
 import { KRYSTAL_GRADIENT, LOGO_ROWS, LOGO_WIDTH } from "../ui/logo.ts";
-import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
+import { fetchModelInfos, loadBotModel, loadBuilder, maskKey, nextApiKey, PROVIDER_PRESETS, saveBuilder, setBotModel, testBuilder, type BuilderConfig, type ModelInfo } from "../builder.ts";
 import { activeFacts, importMirror, lastSleepError, loadFacts, renderGraph, sleepMemories, undoLastSleep, type SleepMarks } from "../memory.ts";
 import { renderPortrait } from "../ui/portrait.ts";
 import {
@@ -63,6 +63,16 @@ const THEME = {
   noMatch: (t: string) => fg("33", t),
 };
 const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+
+/** 端点短标签：域名（本地带端口）——列表头写清「这一屏是哪家的模型」 */
+export const endpointLabel = (baseUrl: string): string => {
+  try {
+    const u = new URL(baseUrl);
+    return u.port ? `${u.hostname}:${u.port}` : u.hostname;
+  } catch {
+    return baseUrl;
+  }
+};
 
 /** 与主 app 同源：pi-tui 的 Editor 自己画上下两条线，颜色由 borderColor 决定（重画会被渲染层吃掉） */
 export const EDITOR_THEME: EditorTheme = { borderColor: (s: string) => fg(BLUE, s), selectList: THEME };
@@ -650,19 +660,31 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   };
 
   // ── /model 与 /login（参考 pi：模型切换与凭据配置都是对话内的轻流程）
-  /** 通用输入弹层：标题 + 单行输入（enter 提交 · esc 取消） */
-  const openInputOverlay = (title: string, prefill: string, onSubmit: (v: string) => void): void => {
+  /** 通用输入弹层：标题 + 可选说明 + 单行输入（enter 提交 · esc 取消）
+   *  allowEmpty：允许空值提交（本地服务无 key / 「留空保持不变」都需要它） */
+  const openInputOverlay = (
+    title: string,
+    prefill: string,
+    onSubmit: (v: string) => void,
+    opts: { allowEmpty?: boolean; hint?: string } = {},
+  ): void => {
     const input = new Input();
     if (prefill) input.setValue(prefill);
     input.onSubmit = (v: string) => {
       const val = (v ?? input.getValue()).trim();
-      if (!val) return;
+      if (!val && !opts.allowEmpty) return;
       closeOverlay();
       onSubmit(val);
     };
     input.onEscape = () => closeOverlay();
     const panel: Component = {
-      render: (w: number) => [bold(` ${title}`), "", ...input.render(Math.max(24, w - 4))],
+      // 标题/说明都要截断：外框只补齐不定宽，超宽会把框撞破
+      render: (w: number) => [
+        bold(truncateToWidth(` ${title}`, w, "…")),
+        ...(opts.hint ? [dim(truncateToWidth(` ${opts.hint}`, w, "…"))] : []),
+        "",
+        ...input.render(Math.max(24, w - 4)),
+      ],
       handleInput: (d: string) => input.handleInput(d),
       invalidate: () => input.invalidate(),
     };
@@ -761,8 +783,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     void fetchModelInfos({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey })
       .then((infos: ModelInfo[]) => {
         const picker = new ListOverlay({
-          title: "Krystal Bot 模型（与平台搭建模型分离）",
-          hint: "↑↓ 选择 · enter 确认 · esc 取消",
+          // 标题写明是哪家的列表：「只有 glm 还是全部」不再靠猜（一家 provider 一次）
+          title: `Krystal Bot 模型 · ${endpointLabel(cfg!.baseUrl)}`,
+          hint: "↑↓ 选择 · enter 确认 · esc 取消（只列当前端点；换 provider 用 /login）",
           items: [
             ...infos.map((m) => ({
               value: m.id,
@@ -814,7 +837,11 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           if (preset) {
             providerLabel = preset.label;
             draft.baseUrl = preset.baseUrl;
-            showKey();
+            // 本机服务（Ollama/LM Studio）不问 key：直接给占位值（pi 的做法：本地也要一个占位符）
+            if (preset.local) {
+              draft.apiKey = nextApiKey("", undefined);
+              startFetch();
+            } else showKey();
           } else showUrl();
         },
         onCancel: closeOverlay,
@@ -828,10 +855,21 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         showKey();
       });
     const showKey = (): void =>
-      openInputOverlay(`API Key · ${providerLabel}（本地服务如 Ollama 可留空回车）`, draft.apiKey ?? "", (v) => {
-        draft.apiKey = v || "none"; // 本地服务不需要真 key，留空占位
-        startFetch();
-      });
+      openInputOverlay(
+        `API Key · ${providerLabel}`,
+        // 故意**不**预填已存的 key：预填后光标停在位置 0，敲新 key 会被拼在旧 key 前面 → 提交必然失败
+        "",
+        (v) => {
+          draft.apiKey = nextApiKey(v, draft.apiKey);
+          startFetch();
+        },
+        {
+          allowEmpty: true,
+          hint: draft.apiKey
+            ? `已存 ${maskKey(draft.apiKey)}——留空回车保持不变，或直接输入新 key`
+            : "本机服务（Ollama / LM Studio）留空回车即可（占位 none）",
+        },
+      );
     const startFetch = (): void => {
       if (!draft.baseUrl || !draft.apiKey) return;
       push(dim(`  正在拉取模型列表（${draft.baseUrl}）…`), "");

@@ -101,11 +101,26 @@ export function maskKey(k: string): string {
   return k.length > 10 ? `${k.slice(0, 7)}…${k.slice(-4)}` : "•".repeat(k.length);
 }
 
+/**
+ * /login 里「这一格输入完了，最终的 key 应该是什么」——三条政策集中在一处（可单测）：
+ * - 输入了值（重配场景）→ 用新值。**绝不可预填旧 key**：pi-tui 的 Input.setValue 把光标留在位置 0，
+ *   敲新 key 会被拼在旧 key 前面（实测得到 "sk-NEWsk-OLD"）→ 提交必失败。
+ * - 留空回车且已有 key → 保持不变（标准「留空不动密钥」语义）
+ * - 留空且从无 key（本地服务 Ollama/LM Studio）→ 占位 "none"（pi 同款：本地也要一个占位符）
+ */
+export function nextApiKey(input: string, current?: string): string {
+  const v = input.trim();
+  if (v) return v;
+  return current?.trim() || "none";
+}
+
 /** 预设 provider（baseUrl 是数据；模型列表动态拉取，provider 上新无需改 Krystal） */
 export interface ProviderPreset {
   id: string;
   label: string;
   baseUrl: string;
+  /** 本机服务：不需要真 key（pi 的做法：仍给一个占位值，不问用户要）→ /login 跳过密钥步 */
+  local?: boolean;
 }
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -115,8 +130,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: "qwen", label: "通义千问（DashScope 兼容）", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
   { id: "zhipu", label: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
   { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
-  { id: "ollama", label: "Ollama（本机）", baseUrl: "http://localhost:11434/v1" },
-  { id: "lmstudio", label: "LM Studio（本机）", baseUrl: "http://localhost:1234/v1" },
+  { id: "ollama", label: "Ollama（本机 · 无需 key）", baseUrl: "http://localhost:11434/v1", local: true },
+  { id: "lmstudio", label: "LM Studio（本机 · 无需 key）", baseUrl: "http://localhost:1234/v1", local: true },
 ];
 
 /** 动态拉取模型列表（GET /models）——provider 侧上新模型自动可见 */
