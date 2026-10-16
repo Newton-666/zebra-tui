@@ -4,7 +4,7 @@
 > 上游：`docs/memory-expose-supersede.md` / `-result.md`（第 1 步，已核实）
 > 评测基线：[`docs/memory-cognitive-structure-test-result.md`](./memory-cognitive-structure-test-result.md)（结论：标签共现图）
 > 实施者：助手（AI）｜实施日期：2026-10-16
-> 提交：`05d3ee6`（本地，未推 `main`）
+> 提交：`d9f8706`（本地，未推 `main`；注：amend 后哈希曾变，本补丁起改为「先提交代码、再提交含哈希的文档」两段式）
 > 开工前备份（**已推 GitHub**）：分支 `backup/20261016-typed-links` · tag `backup-20261016-before-typed-links`，均指向 `08ce0c1`
 
 ## 0. 约束遵守
