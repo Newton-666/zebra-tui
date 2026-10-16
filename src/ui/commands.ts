@@ -28,7 +28,11 @@ export const BOT_COMMANDS: BotCommand[] = [
     aliases: ["sessions"],
     description: "回溯历史会话（↑↓ 选择 · enter 恢复 · d 删除 · esc 返回）",
   },
-  { name: "new", description: "开新会话（清空对话区）" },
+  {
+    name: "farewell",
+    description: "告别这一世：写一段告别（模型）+ 完整时间线（机械）→ 重生（不可逆；想先巩固记忆用 /sleep）",
+  },
+  { name: "new", description: "立刻换一世（无仪式；告别用 /farewell）" },
   { name: "name", argumentHint: "<名称>", description: "给当前会话命名（历史列表里可见）" },
   { name: "model", description: "切换模型（弹窗：来源 → 模型）" },
   { name: "login", description: "配置平台 API（Base URL / Key / 模型名）" },

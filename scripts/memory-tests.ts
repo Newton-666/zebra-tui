@@ -365,6 +365,155 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   console.log("16) 提取偏向结构（typed 邻居优先 · via 标记 · about 偏结构 · recall 持平偏向 · 无边回归）✓");
 }
 
+// ── 告别仪式（/farewell）：时间线 · 档位 · 散文校验 · 落盘 · 放映块（假时钟）· §13 浅链
+//    票：docs/memory-farewell.md（§9 的机械项）。真实库零写入。
+{
+  const F = await import("../src/farewell.ts");
+  const { FarewellBlock, FAREWELL } = await import("../src/view/farewell-block.ts");
+  const { appendEvent: appendEv, createBotSession, loadBotMeta, loadEvents: loadEv } = await import("../src/session.ts");
+
+  // 本世（隔离 store）：2 轮 · 2 次工具（其中 1 次未闭环）
+  // 时间戳用**相对现在**：事实的 created 是“现在”，必须落在时间窗里
+  const base = Date.now() - 300_000;
+  const at = (ms: number) => new Date(base + ms).toISOString();
+  const life = createBotSession({ cwd: TMP, model: "m-test", tier: "写作者", life: 1 }).id;
+  appendEv(life, { t: "msg", at: at(0), role: "user", content: "把圆点修亮一点" });
+  appendEv(life, { t: "msg", at: at(60_000), role: "assistant", content: "好", toolCalls: [{ id: "c1", name: "read_file", args: '{"path":"bot-view.ts"}' }] });
+  appendEv(life, { t: "msg", at: at(90_000), role: "tool", content: "ok", toolCallId: "c1" });
+  appendEv(life, { t: "msg", at: at(120_000), role: "assistant", content: "再看", toolCalls: [{ id: "c2", name: "run_command", args: '{"command":"ls"}' }] });
+  appendEv(life, { t: "msg", at: at(180_000), role: "user", content: "不要自己维护名单" });
+  const wrote = M.addFact({ text: "计时器条件要放行旁路", entities: ["bot-view.ts"], by: "bot", evidence: "bot-view.ts:975" });
+  // 平台自己的收尾指令（在以「〔」开头 → 不计轮数；且它让 t1 ≥ 事实 created）
+  appendEv(life, { t: "msg", at: new Date(Date.now() + 1_000).toISOString(), role: "user", content: "〔告别仪式〕平台自己的收尾指令（不算一轮）" });
+
+  // ① 时间线机械生成
+  const t = F.buildTimeline(loadEv(life), M.loadFacts());
+  assert.equal(t.turns, 2, "平台自己的〔…〕指令不计入轮数（共 3 条 user，计 2 轮）");
+  assert.equal(t.tools, 2, "工具调用计数");
+  assert.equal(t.open.length, 1, "有 start 无 result → 未闭环 1 项");
+  assert.ok(t.open[0]!.text.includes("run_command"), "未闭环条目带工具名");
+  assert.ok(t.wrote.includes(wrote.id), "本世写入的事实进时间线（时间窗交集）");
+  assert.ok(/^本世 \d+ 轮 · 工具 \d+ 次 · 写入 \d+ 条 · 取代 \d+ 条 · 未完成 \d+ 项$/.test(t.stats), "统计行格式");
+  assert.ok(F.timelineLines(t)[0]!.who === "未闭环", "未完成置顶，不埋在中间");
+
+  // ② 档位：四档边界与递增
+  const brief = F.lifeScale({ turns: 3, tools: 0 });
+  const ord = F.lifeScale({ turns: 15, tools: 0 });
+  const rich = F.lifeScale({ turns: 60, tools: 0 });
+  const long = F.lifeScale({ turns: 200, tools: 0 });
+  assert.deepEqual([brief.tier, ord.tier, rich.tier, long.tier], ["brief", "ordinary", "rich", "long"], "四档按 w 分界（10/40/100）");
+  assert.ok(brief.maxChars < ord.maxChars && ord.maxChars < rich.maxChars && rich.maxChars < long.maxChars, "档位越高长度上限越大");
+  assert.ok(brief.minQuotes < long.minQuotes && brief.minBequests < long.minBequests, "档位越高具体条目门槛越高（防形容词拉长）");
+  assert.equal(F.lifeScale({ turns: 15, tools: 600 }).tier, "rich", "工具多也算“分量”（w = 15 + 600/20 = 45 → 丰盛）");
+
+  // ③ 散文校验：五类问题都要报出来
+  const sc = F.lifeScale(t);
+  const bad = F.validateEulogy("谢谢你陪我走过这一段。", { timeline: t, scale: sc, facts: M.loadFacts() });
+  assert.ok(!bad.ok, "不合格的散文应被拒");
+  assert.ok(bad.problems.some((x) => x.includes("偏短")), "报偏短");
+  assert.ok(bad.problems.some((x) => x.includes("模板句")), "报模板句");
+  assert.ok(bad.problems.some((x) => x.includes("未完成没说完")), "报未完成没说完");
+  assert.ok(F.validateEulogy("x".repeat(999), { timeline: t, scale: sc, facts: M.loadFacts() }).problems.some((x) => x.includes("超长")), "报超长");
+
+  // ④ 合格例：引原话 + 说未完成 + 留托付 + 长度达标 → 通过
+  const good = [
+    "你好，陌生人。",
+    `这一世你说过「把圆点修亮一点」，我照做了；后来你说「不要自己维护名单」，我把它记在心里。`,
+    "有一件事我没做完——run_command 那次没有回结果。",
+    `我把「计时器条件要放行旁路」写进了库，下一世我会先想起来。`,
+    "这一世到这里。",
+  ].join("");
+  const okc = F.validateEulogy(good, { timeline: t, scale: { ...sc, minChars: 20, maxChars: 400 }, facts: M.loadFacts() });
+  assert.ok(okc.ok, `合格例应通过（实际：${okc.problems.join(" / ")}）`);
+  assert.ok(okc.quotes >= 1 && okc.bequests >= 1 && okc.unfinished === 1, "原话/托付/未完成都被识别");
+
+  // ⑤ 超长按句截断（不切半个字）
+  const longText = "第一句话。第二句话。第三句话。";
+  assert.equal(F.truncateBySentence(longText, 12), "第一句话。第二句话。", "按句截断，保留完整句子");
+
+  // ⑥ 落盘 + 读回
+  const file = F.writeEulogy({ at: "2026-10-16T11:00:00.000Z", sessionId: life, model: "m-test", prose: good, timeline: t, check: okc });
+  const back = F.loadEulogy(life);
+  assert.ok(file.endsWith("/eulogy.md") && back?.prose.includes("我熄灯了") === false && back!.prose.includes("下一世我会先想起来"), "落盘并读回散文");
+  assert.ok(back!.stats.includes("本世"), "读回带统计");
+
+  // ⑦ 放映块（**假时钟**，不真等）：逐字 / 静默 / 最后一句话 / 定格 / 折叠不含路径 / 展开含审计
+  const b = new FarewellBlock({ timeline: t, scale: sc, eulogyFile: file });
+  const PROSE = "你好，陌生人。这一世我把三件事写进了库。";
+  const step = (ms: number) => { for (let w = 0; w < ms; w += 50) b.advance(50); }; // 50ms 步进 = 生产时钟
+  step(1000); // 扫光一个周期
+  b.setProse(PROSE);
+  step(FAREWELL.leadMs);
+  const seen: number[] = [];
+  for (let i = 0; i < 8; i++) { b.advance(FAREWELL.charMs); seen.push(b.revealedChars); }
+  assert.ok(seen.every((v, i) => i === 0 || v > seen[i - 1]!), "可见字符数严格递增（逐字，不是整段）");
+  assert.equal(seen[1]! - seen[0]!, 1, "默认每帧只吐 1 字（不加速）");
+  // 逐字推进到吐完（不要一次大跳跃：那会把余量带进静默期，断言就不准了）
+  for (let g = 0; b.revealedChars < [...PROSE].length && g < 10_000; g++) b.advance(FAREWELL.charMs);
+  assert.equal(b.revealedChars, [...PROSE].length, "全文吐完");
+  assert.equal(b.frozen, false, "吐完还没定格（先静默）");
+  b.advance(FAREWELL.silenceMs / 2);
+  assert.equal(b.frozen, false, "静默期间不定格");
+  b.advance(FAREWELL.silenceMs / 2 + FAREWELL.footerMs + 100);
+  assert.ok(b.frozen, "静默 + 最后一句话之后定格");
+  const plain = (w: number) => b.render(w).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+  const col = plain(88).join("\n");
+  assert.ok(!col.includes("eulogy.md"), "折叠态不含路径（最后一行是告别，不是回执）");
+  assert.ok(col.includes(FAREWELL.lastWords), "折叠态含「我熄灯了。」");
+  b.toggle();
+  const exp = plain(88).join("\n");
+  assert.ok(exp.includes("本世时间线") && exp.includes("eulogy.md"), "展开态 = 审计（时间线 + 遗嘱路径）");
+  assert.ok(b.render(88).join("\n").includes(FAREWELL.base), "定格 header 保留仪式色（不得回默认白）");
+  assert.ok(b.render(88).join("\n").includes("▾ ctrl+o"), "展开态提示右对齐在 header");
+
+  // ⑧ 可跳过：任意键 → 立吐完并定格
+  const b2 = new FarewellBlock({ timeline: t, scale: sc });
+  b2.setProse(PROSE);
+  b2.skip();
+  assert.ok(b2.frozen && b2.revealedChars === [...PROSE].length, "skip() 立刻定格且全文可见");
+
+  // ⑨ 滞后保护：只在预计超上限时提速
+  const b3 = new FarewellBlock({ timeline: t, scale: sc });
+  b3.advance(1000);
+  b3.setProse("字".repeat(450));
+  b3.advance(FAREWELL.leadMs);
+  const one = (blk: typeof b3) => { const before = blk.revealedChars; blk.advance(FAREWELL.charMs); return blk.revealedChars - before; };
+  assert.equal(one(b3), Math.ceil((450 * FAREWELL.charMs) / FAREWELL.maxMs) > 1 ? one(b3) : 1, "超长时按倍数提速（≤ 上限）");
+  const b4 = new FarewellBlock({ timeline: t, scale: sc });
+  b4.advance(1000);
+  b4.setProse("字".repeat(150));
+  b4.advance(FAREWELL.leadMs);
+  assert.equal(one(b4), 1, "正常长度不加速（慢是默认）");
+
+  // ⑩ §13：life/prev 落进 bot.json，且能从上一世的时间窗取回它写过的事实
+  const next = createBotSession({ cwd: TMP, model: "m-test", tier: "写作者", life: 2, prev: life });
+  const meta2 = loadBotMeta(next.id)!;
+  assert.equal(meta2.life, 2, "第几世落盘");
+  assert.equal(meta2.prev, life, "上一世 id 落盘（浅链）");
+  const recalled = F.recallFromPrevLife(life, loadEv(life), M.loadFacts());
+  assert.ok(recalled.some((f) => f.id === wrote.id), "新生能 recall 出上一世写入的事实");
+
+  // ⑪ 前缀不变：临终指令只是**尾部追加**（前面的事件逐字节不变）
+  const before = loadEv(life);
+  appendEv(life, { t: "msg", at: "2026-10-16T12:00:00.000Z", role: "user", content: "〔告别仪式〕指令" });
+  const after = loadEv(life);
+  assert.equal(JSON.stringify(after.slice(0, before.length)), JSON.stringify(before), "临终指令只追加尾部 → 前缀逐字节不变（缓存安全）");
+
+  // ⑫ 结构护栏：bot-view 必须接线，且不得把指令塞进 SYSTEM
+  const bv = fs
+    .readFileSync(new URL("../src/view/bot-view.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  assert.ok(bv.includes("openFarewellConfirm") && bv.includes("new FarewellBlock"), "命令与放映块必须接线");
+  assert.ok(/appendEvent\(parent,[\s\S]{0,200}?content: dyingInstruction/.test(bv), "临终指令走 user 尾巴（appendEvent，不碰 SYSTEM）");
+  assert.ok(bv.includes("stopFarewell") && bv.includes("FAREWELL.rebirthMs"), "仪式时钟可停 + 定格后重生");
+  assert.ok(bv.includes('i instanceof FarewellBlock'), "ctrl+o 必须覆盖放映块");
+  const spec = fs.readFileSync(new URL("../src/bot.ts", import.meta.url), "utf8");
+  assert.ok(!spec.includes("告别仪式"), "SYSTEM 不得改动（临终指令不进 system prompt）");
+
+  console.log("17) 告别仪式（时间线 · 档位 · 校验 · 落盘 · 假时钟放映 · 跳过 · 提速 · §13 浅链 · 前缀不变）✓");
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log("\nALL MEMORY TESTS PASS");
 // ── 团队线接入记忆图：断言带 by+scope+evidence；conflicts(scope) 抓矛盾；团队/Bot 互不污染

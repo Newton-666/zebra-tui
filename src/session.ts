@@ -16,6 +16,10 @@ export interface BotMeta {
   tier: string;
   createdAt: string;
   updatedAt: string;
+  /** 第几世（1 起；`/farewell` 重生时 +1）。缺省视为第 1 世 */
+  life?: number;
+  /** 上一世会话 id（浅链：只为一个用途 —— 让新生认得出上一世） */
+  prev?: string;
 }
 
 export type SessionEvent =
@@ -32,10 +36,20 @@ const metaFile = (id: string) => path.join(dirOf(id), "bot.json");
 
 export const newBotSessionId = (d = new Date()) => `bot-${d.toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
 
-export function createBotSession(opts: { cwd: string; model: string; tier: string; id?: string }): BotMeta {
+export function createBotSession(opts: { cwd: string; model: string; tier: string; id?: string; life?: number; prev?: string }): BotMeta {
   const id = opts.id ?? newBotSessionId();
   const at = new Date().toISOString();
-  const meta: BotMeta = { id, kind: "bot", cwd: opts.cwd, model: opts.model, tier: opts.tier, createdAt: at, updatedAt: at };
+  const meta: BotMeta = {
+    id,
+    kind: "bot",
+    cwd: opts.cwd,
+    model: opts.model,
+    tier: opts.tier,
+    createdAt: at,
+    updatedAt: at,
+    ...(opts.life ? { life: opts.life } : {}),
+    ...(opts.prev ? { prev: opts.prev } : {}),
+  };
   fs.mkdirSync(dirOf(id), { recursive: true });
   fs.writeFileSync(metaFile(id), `${JSON.stringify(meta, null, 2)}\n`);
   appendEvent(id, { t: "meta", at, cwd: opts.cwd, model: opts.model, tier: opts.tier });

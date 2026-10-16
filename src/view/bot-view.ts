@@ -52,6 +52,18 @@ import {
   updateDivert,
 } from "../divert.ts";
 import { SubsessionBlock, createDivertPrompt } from "./subsession.ts";
+import { FarewellBlock, FAREWELL } from "./farewell-block.ts";
+import {
+  buildTimeline,
+  eulogyPath,
+  lifeScale,
+  timelineLines,
+  loadEulogy,
+  recallFromPrevLife,
+  truncateBySentence,
+  validateEulogy,
+  writeEulogy,
+} from "../farewell.ts";
 import { createTextSegment, type TextSegment } from "./stream-seg.ts";
 
 const BLUE = BLUE_LIGHT; // 平台常量 38;5;45（浅蓝前景）——写成 "45" 会变成洋红背景
@@ -488,16 +500,34 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       memories: activeFacts(loadFacts()).length,
     });
 
+  /** §13：让新生认得出上一世（只读；不改 system、不动前缀） */
+  const lifeLines = (): string[] => {
+    const meta = loadBotMeta(sessionId);
+    const life = meta?.life ?? 1;
+    const out: string[] = [dim(`  ·  这是第 ${life} 世。`)];
+    if (meta?.prev) {
+      const prevFacts = recallFromPrevLife(meta.prev, loadEvents(meta.prev), loadFacts());
+      if (prevFacts.length) {
+        const items = prevFacts
+          .map((f) => `${f.text.slice(0, 36)}${f.evidence ? `（${f.evidence}）` : ""}`)
+          .join(" · ");
+        out.push(dim(`  ·  上一世我记得：${items}`));
+      }
+    }
+    return out;
+  };
+  const introWithLife = (model: string, sessionCwd: string): string[] => [...pushIntro(model, sessionCwd), ...lifeLines()];
+
   /** 从事件流重建对话区（新会话为空；/resume 切换会话时复用） */
   const rebuild = (id: string) => {
     const toolById = new Map<string, ToolBlock>();
     const evs = loadEvents(id);    const intro = evs.find((e) => e.t === "intro");
     const meta = loadBotMeta(id);
     if (intro && intro.t === "intro") {
-      transcript.items.push(...pushIntro(cfg?.model ?? intro.model, intro.cwd), "");
+      transcript.items.push(...introWithLife(cfg?.model ?? intro.model, intro.cwd), "");
     } else if (meta) {
       // 旧会话（本次改动前建的）没有 intro 事件 → 补渲染并回填落盘
-      transcript.items.push(...pushIntro(cfg?.model ?? meta.model, meta.cwd), "");
+      transcript.items.push(...introWithLife(cfg?.model ?? meta.model, meta.cwd), "");
       appendEvent(id, { t: "intro", at: new Date().toISOString(), cwd: meta.cwd, model: meta.model, tier: meta.tier });
     }
     // ── 旁路块：按 afterSeq **原位插回**（进程被杀遗留的 running → 判为中断，不猜内容）
@@ -539,11 +569,21 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       flushDiverts(++seq);
     }
     flushDiverts(evs.length);
+
+    // §7：这一世若告别过 → 把放映块重放出来（它在生命的最末尾，位置本来就对）
+    // 只重放**散文**（时间线已在 eulogy.md 里；展开态可对照），不参与任何写盘
+    const eu = loadEulogy(id);
+    if (eu) {
+      const tl = buildTimeline(evs, loadFacts());
+      const b = new FarewellBlock({ timeline: tl, scale: lifeScale(tl), eulogyFile: eulogyPath(id) });
+      b.freeze(eu.prose);
+      transcript.items.push(b, "");
+    }
   };
   if (resumed) rebuild(sessionId);
   else {
     // 开场画像（hermes 式 Braille 点阵）：作为滚动流的第一条 → 一用起来就自然滚走
-    transcript.items.push(...pushIntro(cfg?.model ?? "（未配置）", cwd), "");
+    transcript.items.push(...introWithLife(cfg?.model ?? "（未配置）", cwd), "");
     appendEvent(sessionId, { t: "intro", at: new Date().toISOString(), cwd, model: cfg?.model ?? "", tier: "写作者" });
   }
   /** 回溯历史（/resume）：清空对话区并重放所选会话 */
@@ -576,7 +616,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       // 删的是当前会话：这里才新建，避免删除瞬间列表里冒出一条
       currentDeleted = false;
       sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "写作者" }).id;
-      transcript.items = [...pushIntro(cfg?.model ?? "", cwd), ""];
+      transcript.items = [...introWithLife(cfg?.model ?? "", cwd), ""];
       transcript.invalidate();
       usage = undefined;
       prevHistory = undefined;
@@ -768,6 +808,190 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       }),
       80,
     );
+  };
+
+  // ── 告别仪式（/farewell）：确认 → 临终一轮 → 放映（逐字吐出）→ 落盘 → 重生
+  //    设计：docs/memory-farewell.md。时间线由代码机械生成（全、可核对）；散文由模型写（温度）。
+  let farewellTimer: ReturnType<typeof setInterval> | undefined;
+  const stopFarewell = (): void => {
+    if (farewellTimer) clearInterval(farewellTimer);
+    farewellTimer = undefined;
+  };
+
+  /** 确认弹窗：**代价可见**（不可逆＝换会话），列表选择而非敲 yes */
+  const openFarewellConfirm = (): void => {
+    if (!cfg) {
+      push(fg("31", " ✗ 未配置平台模型——先到 Platform model 配置"), "");
+      refresh();
+      return;
+    }
+    if (busy) {
+      push(dim("  主会话正在跑——先 esc 中断，再告别"), "");
+      refresh();
+      return;
+    }
+    if (runningDiverts.size > 0) {
+      push(dim(`  还有 ${runningDiverts.size} 个旁路在跑——先 /stop，再告别`), "");
+      refresh();
+      return;
+    }
+    const picker = new ListOverlay({
+      title: "告别这一世",
+      hint: "↑↓ 选择 · enter 确认 · esc 取消",
+      items: [
+        {
+          value: "go",
+          label: "继续告别",
+          description: "写下一段告别（模型）+ 完整时间线（机械生成），然后开新的一世",
+        },
+        { value: "cancel", label: "取消", description: "什么都不做（想先巩固记忆：esc 后跑一次 /sleep）" },
+      ],
+      onPick: (v) => {
+        closeOverlay();
+        if (v === "go") void runFarewell();
+      },
+      onCancel: closeOverlay,
+    });
+    openOverlay(picker, 84);
+  };
+
+  /** 档位/长度/门槛算好后写进临终指令；工具调用保留（写记忆库是“托付”的来源） */
+  const dyingInstruction = (timeline: ReturnType<typeof buildTimeline>, scale: ReturnType<typeof lifeScale>): string =>
+    [
+      "〔告别仪式〕这一世的上下文要结束了。请为本世写一段告别。",
+      `- 只写**一段连贯的散文**（不要项目符号列表），${scale.minChars}–${scale.maxChars} 字`,
+      `- 至少引用 ${scale.minQuotes} 句**我说过的原话**（下面时间线里 who=你 的条目）`,
+      timeline.open.length ? `- 有 ${timeline.open.length} 件未完成的事，必须说出来` : "- 没有未完成的事，不必编",
+      `- 至少提到 ${scale.minBequests} 条你写进记忆库的事实，并说“下一世我会先想起来”`,
+      "- 不要客套模板（“谢谢你的陪伴”之类，放进别人的告别也成立的话）；不要技术流水账；最后不要写“我熄灯了”（那行由平台落）",
+      "",
+      "本世时间线（机械生成，可核对）：",
+      `统计：${timeline.stats}`,
+      ...timelineLines(timeline).slice(0, 80).map((l) => `${l.at}  ${l.who}  ${l.text}`),
+    ].join("\n");
+
+  /** 临终一轮 → 放映 → 落盘 → 重生 */
+  const runFarewell = async (): Promise<void> => {
+    if (!cfg) return;
+    const parent = sessionId; // 捕获：稍后会换会话
+    const timeline = buildTimeline(loadEvents(parent), loadFacts());
+    const scale = lifeScale(timeline);
+    const block = new FarewellBlock({ timeline, scale });
+    if (transcript.items.length > 0 && transcript.items[transcript.items.length - 1] !== "") push("");
+    transcript.items.push(block, "");
+    busy = true;
+    state = "告别中";
+    abort = new AbortController();
+    refresh();
+
+    // 仪式自己的时钟：扫光与吐字都由它推进（**不挂 busy 条件** —— 正是“旁路圆点不闪”那个坑）
+    let acc = "";
+    let settled = false;
+    stopFarewell();
+    farewellTimer = setInterval(() => {
+      block.advance(50);
+      if (!settled && block.frozen) {
+        settled = true;
+        stopFarewell();
+        settleFarewell(parent, block, timeline, scale);
+      }
+      tui.requestRender();
+    }, 50);
+    farewellTimer.unref?.();
+
+    // 临终一轮：指令走 **user 消息（尾巴）**，SYSTEM 一字不动 → 前缀缓存零影响
+    appendEvent(parent, { t: "msg", at: new Date().toISOString(), role: "user", content: dyingInstruction(timeline, scale) });
+    await runBotTask({
+      cfg,
+      cwd,
+      events: loadEvents(parent),
+      signal: abort.signal,
+      onEvent: (e: BotEvent) => {
+        if (e.type === "text") {
+          acc += e.delta;
+          block.setProse(acc); // 队列增长；吐字由时钟按节拍消费
+          refresh();
+        } else if (e.type === "assistant") {
+          appendEvent(parent, {
+            t: "msg",
+            at: new Date().toISOString(),
+            role: "assistant",
+            content: e.content,
+            toolCalls: e.toolCalls,
+          });
+        } else if (e.type === "tool_result") {
+          appendEvent(parent, {
+            t: "msg",
+            at: new Date().toISOString(),
+            role: "tool",
+            content: (e.denied ? "[策略闸门拒绝] " : "") + e.output,
+            toolCallId: e.id,
+          });
+        } else if (e.type === "usage") {
+          appendEvent(parent, { t: "usage", at: new Date().toISOString(), prompt: e.prompt, cached: e.cached, completion: e.completion, model: cfg.model });
+        } else if (e.type === "error") {
+          // 降级必须可见：不假装写出了告别
+          acc = `（这一世的告别没能写出来——临终一轮失败：${e.message}。时间线在展开里。）`;
+          block.setProse(acc);
+          push(fg("31", ` ✗ 临终一轮失败：${e.message}`), "");
+          refresh();
+        }
+      },
+    });
+    // 模型回合结束 → 散文定稿（校准流式尾部差异）；之后时钟继续吐完并定格
+    if (!acc.trim()) {
+      acc = "（这一世的告别没能写出来——临终一轮没有产出。时间线在展开里。）";
+      block.setProse(acc);
+    } else {
+      block.setProse(acc.trim());
+    }
+    touchSession(parent);
+    state = "告别中";
+    refresh();
+  };
+
+  /** 定格之后：写 eulogy.md（人可读、可审计）→ 停一下 → 重生 */
+  const settleFarewell = (
+    parent: string,
+    block: FarewellBlock,
+    timeline: ReturnType<typeof buildTimeline>,
+    scale: ReturnType<typeof lifeScale>,
+  ): void => {
+    const prose = block.proseText;
+    const check = validateEulogy(prose, { timeline, scale, facts: loadFacts() });
+    const file = writeEulogy({
+      at: new Date().toISOString(),
+      sessionId: parent,
+      model: cfg?.model ?? "",
+      prose,
+      timeline,
+      check,
+    });
+    block.eulogyFile = file;
+    refresh();
+    // 校验未过是**给人看**的（机器只筛掉假的；真的动人由人打分）
+    if (!check.ok) push(dim(`  · 告别校验：${check.problems.length} 项待人工复核（已写进遗嘱）`), "");
+    busy = false;
+    state = "空闲";
+    const life = (loadBotMeta(parent)?.life ?? 1) + 1;
+    setTimeout(() => rebirth(parent, life), FAREWELL.rebirthMs);
+  };
+
+  /** 重生：新的一世（`prev` 记住从哪来 —— §13） */
+  const rebirth = (prevId: string, life: number): void => {
+    stopFarewell();
+    sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "写作者", life, prev: prevId }).id;
+    transcript.items = [...introWithLife(cfg?.model ?? "", cwd), ""];
+    transcript.invalidate();
+    usage = undefined;
+    prevHistory = undefined;
+    prefixStable = undefined;
+    foldCount = 0;
+    summaryActive = false;
+    busy = false;
+    state = "空闲";
+    push(dim(`  已为你开新的一世（第 ${life} 世）`), "");
+    refresh();
   };
 
   /** /model：切 Krystal Bot 自己的模型（动态拉取；与平台搭建模型分离，只写 config.json 的 bot.model） */
@@ -1273,7 +1497,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         abortMain(); // 开新会话前级联中断旁路（同 /resume）
         runningDiverts.clear();
         sessionId = createBotSession({ cwd, model: cfg.model, tier: "写作者" }).id;
-        transcript.items = [...pushIntro(cfg.model, cwd), ""];
+        transcript.items = [...introWithLife(cfg.model, cwd), ""];
         transcript.invalidate();
         usage = undefined;
         prevHistory = undefined;
@@ -1339,6 +1563,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           refresh();
         });
         return;
+      } else if (cmd === "farewell") {
+        openFarewellConfirm();
       } else if (cmd === "divert" || cmd.startsWith("divert ")) {
         // 给任务→直接派发；只打命令→弹窗输入（两种都工作）
         const task = body.replace(/^[/:]\s*divert\s*/i, "").trim();
@@ -1386,6 +1612,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     },
     handleInput(data: string): void {
       const quit = () => {
+        stopFarewell(); // 仪式时钟一并收掉
         abortMain(); // 退出前级联中断旁路：绝不留孤儿（它还会跑命令、写文件、写记忆）
         tui.stop();
         finish();
@@ -1399,9 +1626,21 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         tui.requestRender();
         return;
       }
-      // ctrl+o：折叠/展开旁路块（pi 同款惯例：app.tools.expand = ctrl+o）
+      // 仪式进行中：任意键 → 立刻吐完并定格（票 §5.5“可跳过”）；ctrl+c 已在上面处理
+      {
+        const live = transcript.items.find((i) => i instanceof FarewellBlock && !i.frozen);
+        if (live instanceof FarewellBlock) {
+          live.skip();
+          tui.requestRender();
+          return;
+        }
+      }
+      // ctrl+o：折叠/展开可折叠块（pi 同款惯例：app.tools.expand = ctrl+o）
+      // 旁路块与告别放映块共用这一个开关
       if (matchesKey(data, "ctrl+o")) {
-        const blocks = transcript.items.filter((i): i is SubsessionBlock => i instanceof SubsessionBlock);
+        const blocks = transcript.items.filter(
+          (i): i is SubsessionBlock | FarewellBlock => i instanceof SubsessionBlock || i instanceof FarewellBlock,
+        );
         if (blocks.length > 0) {
           const to = !blocks.some((b) => b.expanded); // 有折叠的 → 全展开；全展开 → 全收起
           for (const b of blocks) if (b.expanded !== to) b.toggle();
