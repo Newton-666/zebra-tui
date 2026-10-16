@@ -993,22 +993,30 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     // **不自动重生**（owner 2026-10-16）：全部显示完之后给一个弹窗，由人决定何时开新的一世
     busy = false;
     state = "空闲";
-    const life = (loadBotMeta(parent)?.life ?? 1) + 1;
+    openRebirthConfirm(parent);
+  };
+
+  /** 这一世已经**死**了（告别过）——重生确认弹窗；也用于“死了还发消息”时把意图转成这个问题 */
+  const openRebirthConfirm = (deadSession: string): void => {
+    const life = (loadBotMeta(deadSession)?.life ?? 1) + 1;
     const picker = new ListOverlay({
       title: `这一世已经写下来了（第 ${life} 世准备好了）`,
       hint: "↑↓ 选择 · enter 确认 · esc 稍后再说",
       items: [
-        { value: "go", label: `开始第 ${life} 世`, description: "开新会话；开场会带上「上一世我记得：…」" },
-        { value: "stay", label: "留在这里", description: "不做任何事（想再来一次可以再敲 /farewell，或稍后 /new）" },
+        { value: "go", label: `开始第 ${life} 世`, description: "开新会话；开场会带上「上一世我记得：…」（你输入框里的字会留着）" },
+        { value: "stay", label: "留在这里", description: "什么都不做——注意：**本会话已告别，不再接受消息**（稍后 /new 开新的一世）" },
       ],
       onPick: (v) => {
         closeOverlay();
-        if (v === "go") rebirth(parent, life);
+        if (v === "go") rebirth(deadSession, life);
       },
       onCancel: closeOverlay,
     });
     openOverlay(picker, 84);
   };
+
+  /** 这一世是否已经告别过（eulogy.md 就是墓志；无需新字段） */
+  const hasFarewelled = (id: string): boolean => loadEulogy(id) !== undefined;
 
   /** 重生：新的一世（`prev` 记住从哪来 —— §13） */
   const rebirth = (prevId: string, life: number): void => {
@@ -1529,7 +1537,15 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       else if (cmd === "new") {
         abortMain(); // 开新会话前级联中断旁路（同 /resume）
         runningDiverts.clear();
-        sessionId = createBotSession({ cwd, model: cfg.model, tier: "写作者" }).id;
+        // /new = 无仪式的“立刻换一世”：同样带 life/prev（否则新一世会显示成第 1 世、也认不出上一世）
+        const prevId = sessionId;
+        sessionId = createBotSession({
+          cwd,
+          model: cfg.model,
+          tier: "写作者",
+          life: (loadBotMeta(prevId)?.life ?? 1) + 1,
+          prev: prevId,
+        }).id;
         transcript.items = [...introWithLife(cfg.model, cwd), ""];
         transcript.invalidate();
         usage = undefined;
@@ -1597,7 +1613,10 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         });
         return;
       } else if (cmd === "farewell") {
-        openFarewellConfirm();
+        if (hasFarewelled(sessionId)) {
+          push(dim("  这一世已经告别过了——再来一次不会写出新的告别；用 /new 开新的一世"), "");
+          refresh();
+        } else openFarewellConfirm();
       } else if (cmd === "divert" || cmd.startsWith("divert ")) {
         // 给任务→直接派发；只打命令→弹窗输入（两种都工作）
         const task = body.replace(/^[/:]\s*divert\s*/i, "").trim();
@@ -1629,6 +1648,14 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       return;
     }
     if (busy) return; // 正文消息仍要求主会话空闲（命令层不受限）
+    // 这一世已经告别过（eulogy.md 在）→ 不再接受消息：死掉的一世不该还能说话。
+    // 把“想说话”这个意图直接转成“要开新的一世吗”，且**不清输入框**（开新世后可直接发送）。
+    if (hasFarewelled(sessionId)) {
+      push(dim("  这一世已经告别过了（写下的告别在 /resume 与 eulogy.md 里）。要接着做事就开新的一世："), "");
+      refresh();
+      openRebirthConfirm(sessionId);
+      return;
+    }
     clearEditor();
     // pi 风格：消息以「整宽蓝色背景块」落入对话区（块后留一空行）
     push(new UserBlock(body), "");

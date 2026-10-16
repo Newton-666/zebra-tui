@@ -546,8 +546,12 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   assert.ok(/appendEvent\(parent,[\s\S]{0,200}?content: dyingInstruction/.test(bv), "临终指令走 user 尾巴（appendEvent，不碰 SYSTEM）");
   assert.ok(bv.includes("stopFarewell"), "仪式时钟可停（退出/定稿都要收掉）");
   assert.ok(!/setTimeout\(\s*\(\)\s*=>\s*rebirth/.test(bv), "**不得自动重生**（owner 2026-10-16：改为弹窗确认）");
-  assert.ok(bv.includes("rebirth(parent, life)") && /开始第 \$\{life\} 世/.test(bv), "重生走弹窗确认");
-  assert.ok(bv.includes('i instanceof FarewellBlock'), "ctrl+o 必须覆盖放映块");
+  assert.ok(/openRebirthConfirm\(/.test(bv) && /开始第 \$\{life\} 世/.test(bv) && /rebirth\(deadSession, life\)/.test(bv), "重生走弹窗确认（openRebirthConfirm → rebirth）");
+  assert.ok(bv.includes("i instanceof FarewellBlock"), "ctrl+o 必须覆盖放映块");
+  // 死掉的一世不该还能说话：正文消息必须被拒（并把意图转成“要开新的一世吗”），且不第二次 farewell
+  assert.ok(/hasFarewelled\(sessionId\)[\s\S]{0,200}?openRebirthConfirm\(sessionId\)/.test(bv), "告别过的会话必须拒绝正文消息（转成重生确认）");
+  assert.ok(/cmd === "farewell"[\s\S]{0,120}?hasFarewelled/.test(bv), "告别过的会话不得再次 /farewell");
+  assert.ok(/const prevId = sessionId[\s\S]{0,200}?prev: prevId/.test(bv), "/new 也要带 life/prev（否则新一世认不出上一世）");
   const spec = fs.readFileSync(new URL("../src/bot.ts", import.meta.url), "utf8");
   assert.ok(!spec.includes("告别仪式"), "SYSTEM 不得改动（临终指令不进 system prompt）");
 
