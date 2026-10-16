@@ -153,6 +153,36 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   console.log(`12) 终端闸门（恒定完全访问 + 黑名单 + 围栏 + 防误删）✓`);
 }
 
+// ── 取代「立场」的暴露（只读渲染断言）：replaces / supersededBy / 文案诚实 / ←K
+{
+  const old = M.addFact({ text: "取代暴露测试：注入块硬顶 PIN_LIMIT=20", entities: ["取代暴露测试"], by: "bot" });
+  const neo = M.supersedeFact(old.id, { text: "取代暴露测试：注入通道已删（纯检索）", entities: ["取代暴露测试"], by: "bot" })!;
+  const oldFact = M.loadFacts().find((f) => f.id === old.id)!;
+
+  // 链头方向（agent 经五查询唯一可达的方向）
+  assert.ok(M.renderFacts([neo]).includes(`replaces:${old.id}`), "链头渲染应带 replaces:旧id");
+  // 被取代方向（经五查询取不到，但一旦渲染必须标出来）
+  assert.ok(M.renderFacts([oldFact]).includes(`supersededBy:${neo.id}`), "已取代条渲染应带 supersededBy:新id");
+  // 「取不回」的事实依据：五查询默认不返回已取代条
+  assert.ok(!M.recall("取代暴露测试", 10).some((f) => f.id === old.id), "五查询不返回已取代条");
+  assert.ok(!M.about("取代暴露测试").some((f) => f.id === old.id), "about 也不返回已取代条");
+
+  // /memory 图视图：文案不再声称「可检索」，链头标 ←K
+  const g = M.renderGraph();
+  assert.ok(!g.lines[0]!.includes("可检索"), "不得再声称已取代条「可检索」");
+  assert.ok(g.lines[0]!.includes("五查询默认取不回"), "应说明已取代条经五查询取不回");
+  assert.ok(
+    g.lines.some((l) => l.includes(`[${neo.id}]`) && l.includes("←1")),
+    "链头应标 ←K（人读视图也能看出接替了几条）",
+  );
+
+  // tag 双向且只给 id（不展开旧正文 → 不捣窗口）
+  assert.equal(M.supersedeTag(neo), ` · replaces:${old.id}`, "链头 tag 只含 replaces");
+  assert.equal(M.supersedeTag(oldFact), ` · supersededBy:${neo.id}`, "旧条 tag 只含 supersededBy");
+  assert.ok(!M.supersedeTag(neo).includes(oldFact.text.slice(0, 8)), "tag 不得携带旧正文");
+  console.log("13) 取代立场暴露（replaces · supersededBy · 文案诚实 · ←K）✓");
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log("\nALL MEMORY TESTS PASS");
 // ── 团队线接入记忆图：断言带 by+scope+evidence；conflicts(scope) 抓矛盾；团队/Bot 互不污染

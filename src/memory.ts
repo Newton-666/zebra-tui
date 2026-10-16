@@ -97,6 +97,40 @@ export function loadFacts(): Fact[] {
 
 export const activeFacts = (facts: Fact[]): Fact[] => facts.filter((f) => !f.supersededBy);
 
+/**
+ * 取代反查索引：newId → 被它接替的旧 id[]（由 `supersededBy` 反查）。
+ * 真源不变（仍是 append-only facts.jsonl + supersededBy 字段）；这里只是**读侧索引**，
+ * 目的是让「本条接替了谁」也能被渲染出来——取代链原本查五个查询、看 /memory、读镜像都看不见，
+ * 只有直读 jsonl 才看得见（见 docs/memory-cognitive-structure-test-result.md §3.1）。
+ * 与 loadFacts 共用 mtime:size 签名缓存，不新增任何落盘物。
+ */
+let replaceCache: { key: string; map: Map<string, string[]> } | undefined;
+function replaceIndex(): Map<string, string[]> {
+  const all = loadFacts(); // 顺带把当前签名写进 cache
+  const key = cache?.key ?? "";
+  if (replaceCache && replaceCache.key === key) return replaceCache.map;
+  const map = new Map<string, string[]>();
+  for (const f of all) {
+    if (!f.supersededBy) continue;
+    map.set(f.supersededBy, [...(map.get(f.supersededBy) ?? []), f.id]);
+  }
+  replaceCache = { key, map };
+  return map;
+}
+
+/**
+ * 取代元数据标记（只给 id，**不展开旧正文**——避免撑窗口）。两个方向：
+ * - `supersededBy:<新id>`：本条已被取代（经五查询通常取不到这种条；一旦渲染必须标出来）
+ * - `replaces:<旧id,…>`：本条接替了这些旧条（链头方向 → agent 由此能推断「谁更新了谁」）
+ */
+export function supersedeTag(f: Fact, limit = 4): string {
+  const old = replaceIndex().get(f.id) ?? [];
+  const parts: string[] = [];
+  if (f.supersededBy) parts.push(`supersededBy:${f.supersededBy}`);
+  if (old.length) parts.push(`replaces:${old.slice(0, limit).join(",")}${old.length > limit ? `+${old.length - limit}` : ""}`);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
 export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number; scope?: string }
 
 export function addFact(input: AddInput): Fact & { existed?: boolean } {
@@ -611,7 +645,12 @@ export function importMirror(): ImportResult {
 /** 把查询结果渲染成给模型看的一行行文本 */
 export const renderFacts = (facts: Fact[], emptyHint = "（没有匹配的记忆）"): string =>
   facts.length
-    ? facts.map((f) => `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}`).join("\n")
+    ? facts
+        .map(
+          (f) =>
+            `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}${supersedeTag(f)}`,
+        )
+        .join("\n")
     : emptyHint;
 // ---------- /memory：把记住的东西与图都画出来（终端友好的「树 + 边」） ----------
 
@@ -632,6 +671,8 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
     for (const e of f.entities) byEntity.set(e, [...(byEntity.get(e) ?? []), f]);
   }
   const sorted = [...byEntity.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const replacedCount = (id: string) => replaceIndex().get(id)?.length ?? 0;
+  const chainHeads = active.filter((f) => replacedCount(f.id) > 0).length;
 
   // 实体间的边：同一条事实里的实体两两相连
   const edge = new Map<string, number>();
@@ -648,7 +689,9 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
     const cs = conflicts(scope); const lines: string[] = [];
   lines.push(
     `记忆图：${active.length} 条事实 · ${byEntity.size} 个实体 · ${edge.size} 条关联` +
-      `${superseded ? ` · ${superseded} 条被取代（不注入，可检索）` : ""}` +
+      // 诚实文案：已取代条**不经五查询返回**（全部经 activeFacts 过滤），只能直读真源
+      `${superseded ? ` · ${superseded} 条被取代（保留可审计；五查询默认取不回，真源在 facts.jsonl）` : ""}` +
+      `${chainHeads ? ` · ${chainHeads} 条接替了旧条（标 ←K，取代链在真源里）` : ""}` +
       `${cs.length ? ` · ${cs.length} 处矛盾` : ""}`,
   );
   if (!active.length) {
@@ -658,7 +701,8 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
     lines.push("", `● ${e} (${list.length})`);
     list.forEach((f, i) => {
       const branch = i === list.length - 1 ? "└─" : "├─";
-      const seg = `[${f.id}] ${f.text}  · ${f.by} · trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}`;
+      const k = replacedCount(f.id);
+      const seg = `[${f.id}] ${f.text}  · ${f.by} · trust ${f.trust.toFixed(2)}${f.evidence ? ` · ${f.evidence}` : ""}${k ? ` · ←${k}` : ""}`;
       lines.push(`  ${branch} ` + (marks?.greenIds.has(f.id) ? fg("38;5;71", seg) : seg));
     });
   }

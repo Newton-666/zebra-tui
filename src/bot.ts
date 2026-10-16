@@ -9,7 +9,7 @@ import type { BuilderConfig } from "./builder.ts";
 import { assembleContext, estimateTokens, summarize, withSystem } from "./context.ts";
 import { decide } from "./gate.ts";
 import { contextWindow, latestNote, type SessionEvent } from "./session.ts";
-import { about, addFact, adjustTrust, conflicts, connect, globalFactCount, lastSleepError, markUsed, recall, related, renderFacts, sleepMemories, supersedeFact, SLEEP_HARD, SLEEP_SOFT } from "./memory.ts";
+import { about, addFact, adjustTrust, conflicts, connect, globalFactCount, lastSleepError, markUsed, recall, related, renderFacts, sleepMemories, supersedeFact, supersedeTag, SLEEP_HARD, SLEEP_SOFT } from "./memory.ts";
 import { assumedWindow, learnFromErrorMessage } from "./windows.ts";
 
 const execAsync = promisify(exec);
@@ -262,7 +262,12 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
           ok: true,
           output: cs.length
             ? cs
-                .map((c) => `冲突（${c.reason}）：\n  A [${c.a.id}] ${c.a.text} (by ${c.a.by})\n  B [${c.b.id}] ${c.b.text} (by ${c.b.by})`)
+                .map(
+                  (c) =>
+                    // conflicts 不走 renderFacts（它自己拼行），所以要在这里也附取代元数据，
+                    // 否则「暴露立场」会漏掉五个查询里的这一个
+                    `冲突（${c.reason}）：\n  A [${c.a.id}] ${c.a.text} (by ${c.a.by})${supersedeTag(c.a)}\n  B [${c.b.id}] ${c.b.text} (by ${c.b.by})${supersedeTag(c.b)}`,
+                )
                 .join("\n")
             : "（未发现矛盾）",
         };
