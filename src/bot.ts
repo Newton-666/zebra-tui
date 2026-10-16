@@ -48,7 +48,7 @@ export const READER_TOOLS: BotTool[] = [
   {
     name: "memory",
     description:
-      "长期记忆（跨会话，纯检索：不注入上下文，按需查询——跨会话任务开始先 recall 任务词，碰不熟的概念先 about）。写入前分类四问：①用户偏好/工作方式 ②项目事实/结论 ③坑与修法（必须带 evidence）④会话级临时状态——一律不存。写法：一主题一条；实体给具体（忌宽泛大词）；有新证据用 supersede 刷新而非堆新条。op=remember 写入｜recall 检索｜about 实体｜related 相关｜connect 交集｜conflicts 矛盾｜helpful/wrong 反馈调信任｜supersede 取代旧条",
+      "长期记忆（跨会话，纯检索：不注入上下文，按需查询——跨会话任务开始先 recall 任务词，碰不熟的概念先 about）。写入前分类四问：①用户偏好/工作方式 ②项目事实/结论 ③坑与修法（必须带 evidence）④会话级临时状态——一律不存。写法：一主题一条；实体给具体（忌宽泛大词）；有新证据用 supersede 刷新而非堆新条。边可选：remember/supersede 可带 links=[{rel,to}]（rel ∈ updates/contradicts/causes/depends_on/part_of；to=已有事实 id，先写那条再连它）——因果/依赖只能靠边表达，实体共现读不出关系；不写边完全合法。op=remember 写入｜recall 检索｜about 实体｜related 相关｜connect 交集｜conflicts 矛盾｜helpful/wrong 反馈调信任｜supersede 取代旧条",
     parameters: {
       type: "object",
       properties: {
@@ -61,6 +61,19 @@ export const READER_TOOLS: BotTool[] = [
         a: { type: "string", description: "op=connect 的第一个实体" },
         b: { type: "string", description: "op=connect 的第二个实体" },
         evidence: { type: "string", description: "op=remember：证据（文件:行号 / 命令输出片段）" },
+        links: {
+          type: "array",
+          description:
+            "op=remember/supersede（可选）：typed 出边 [{rel,to}]。rel ∈ updates/contradicts/causes/depends_on/part_of（别名 leads_to→causes）；to=已有事实 id。要表达因果/依赖/立场就写边；不写也合法",
+          items: {
+            type: "object",
+            properties: {
+              rel: { type: "string", description: "关系（封闭词表）" },
+              to: { type: "string", description: "目标事实 id（先写那条，再连它）" },
+            },
+            required: ["rel", "to"],
+          },
+        },
       },
       required: ["op"],
     },

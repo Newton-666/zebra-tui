@@ -20,6 +20,56 @@ export interface Fact {
   supersededBy?: string;
   /** 归属：undefined = 全局（Bot 的记忆）；team-xxx = 某团队（团队断言互不污染） */
   scope?: string;
+  /** 可选 typed link（出边）：本条自己声明的「与别的哪条事实是什么关系」。
+   *  旧条无此字段 ≡ 无出边，完全兼容（真源仍是 append-only facts.jsonl） */
+  links?: Link[];
+}
+
+/** typed link 的**封闭词表**（≤5）。硬的只是词表边界（未知 rel 一律拒绝），不是「必须写」 */
+export const REL_TYPES = ["updates", "contradicts", "causes", "depends_on", "part_of"] as const;
+export type RelType = (typeof REL_TYPES)[number];
+/** 别名 → 正式名（只收被明确提到的同义词，不开开放字符串 —— 避免同义爆炸） */
+const REL_ALIAS: Record<string, RelType> = { leads_to: "causes" };
+/** 单条事实的出边上限（防一次灌一大堆；与 entities 上限 12 同风格） */
+export const LINK_MAX = 8;
+export interface Link {
+  rel: RelType;
+  /** 指向的已有事实 id（允许指向已 supersede 的条，以便连历史） */
+  to: string;
+}
+
+/** 归一化：小写 + 连字符→下划线 + 别名映射；未知返回 undefined（由调用方拒绝） */
+export function normalizeRel(raw: string): RelType | undefined {
+  const k = raw.trim().toLowerCase().replace(/-/g, "_");
+  if ((REL_TYPES as readonly string[]).includes(k)) return k as RelType;
+  return REL_ALIAS[k];
+}
+
+/**
+ * 校验并归一化出边（写入前的唯一关卡）。
+ * 拒绝：未知 rel / 缺 to / to 不存在 / 自环 / 超过 LINK_MAX；
+ * 静默去重：完全相同的 (rel,to) 重复声明（同一断言重复说一遍无害）。
+ */
+export function validateLinks(links: { rel: string; to: string }[] | undefined, selfId?: string): Link[] {
+  if (!links?.length) return [];
+  if (links.length > LINK_MAX) throw new Error(`links 最多 ${LINK_MAX} 条（收到 ${links.length}）`);
+  const ids = new Set(loadFacts().map((f) => f.id));
+  const out: Link[] = [];
+  const seen = new Set<string>();
+  for (const l of links) {
+    const rawRel = String(l?.rel ?? "");
+    const rel = normalizeRel(rawRel);
+    if (!rel) throw new Error(`非法 rel「${rawRel}」——合法集合：${REL_TYPES.join(" / ")}（别名：leads_to→causes）`);
+    const to = String(l?.to ?? "").trim();
+    if (!to) throw new Error(`rel=${rel} 缺少 to（要指向的已有事实 id）`);
+    if (selfId && to === selfId) throw new Error(`rel=${rel} 的 to 指向自己（自环不允许）`);
+    if (!ids.has(to)) throw new Error(`rel=${rel} 的 to=${to} 不存在（只能指向已有事实 id：先写那条，再连它）`);
+    const key = `${rel}:${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ rel, to });
+  }
+  return out;
 }
 
 type Line =
@@ -131,16 +181,33 @@ export function supersedeTag(f: Fact, limit = 4): string {
   return parts.length ? ` · ${parts.join(" · ")}` : "";
 }
 
-export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number; scope?: string }
+/**
+ * typed 出边摘要（只列本条**自己声明**的边；入边见 /memory 的「关系（typed）」区）。
+ * - 上限 3 条（超出折 `+N`）→ 控制每次召回的字符成本
+ * - 与 supersede 去重：`rel=updates` 且 `to === supersededBy` 的边已由 supersededBy 表达，不重复打印
+ */
+export function linkTag(f: Fact, limit = 3): string {
+  // 去重：本条已用 replaces 表达过的旧条（即 X.supersededBy === 本条），不要再打一条 →updates:X；
+  // 反向同理（本条被 Y 取代、同时又声明 updates:Y）也不重复打
+  const replaced = new Set(replaceIndex().get(f.id) ?? []);
+  const links = (f.links ?? []).filter((l) => !(l.rel === "updates" && (replaced.has(l.to) || l.to === f.supersededBy)));
+  if (!links.length) return "";
+  const head = links.slice(0, limit).map((l) => `→${l.rel}:${l.to}`).join(" · ");
+  return ` · ${head}${links.length > limit ? ` · +${links.length - limit}` : ""}`;
+}
+
+export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number; scope?: string; links?: { rel: string; to: string }[] }
 
 export function addFact(input: AddInput): Fact & { existed?: boolean } {
   const at = new Date().toISOString();
+  const links = validateLinks(input.links); // 写入前的唯一关卡（未知 rel / 不存在的 to / 自环 / 超限 → 抛错拒绝）
   // 一主题一条：同文本的活跃事实 → 更新原条（加强信任），不新增（否则重复记忆会淹没注入块）
   const key = `${input.scope ?? ""}\u0000${input.text.trim().toLowerCase()}`;
   const dup = activeFacts(loadFacts()).find((f) => `${f.scope ?? ""}\u0000${f.text.trim().toLowerCase()}` === key);
   if (dup && key) {
     const trust = Math.min(1, dup.trust + 0.05);
-    append({ t: "fact_update", id: dup.id, patch: { updated: at, trust } });
+    // 显式声明了 links → 以本次声明为准（可借此重写/删除边）；没声明则不动原有边
+    append({ t: "fact_update", id: dup.id, patch: { updated: at, trust, ...(input.links?.length ? { links } : {}) } });
     writeMirror();
     return { ...dup, trust, existed: true };
   }
@@ -155,6 +222,7 @@ export function addFact(input: AddInput): Fact & { existed?: boolean } {
     created: at,
     updated: at,
     scope: input.scope,
+    ...(links.length ? { links } : {}),
   };
   append({ t: "fact", f });
   writeMirror();
@@ -165,7 +233,8 @@ export function addFact(input: AddInput): Fact & { existed?: boolean } {
 export function supersedeFact(oldId: string, input: AddInput): Fact | undefined {
   const old = loadFacts().find((f) => f.id === oldId);
   if (!old) return undefined;
-  const f = addFact({ ...input, entities: input.entities ?? old.entities });
+  // 未显式声明 links 时**继承**旧条出边：换代不是断链（否则每次 supersede 都会丢一批边）
+  const f = addFact({ ...input, entities: input.entities ?? old.entities, links: input.links ?? old.links });
   append({ t: "supersede", id: oldId, by: f.id, at: new Date().toISOString() });
   writeMirror();
   return f;
@@ -648,13 +717,13 @@ export const renderFacts = (facts: Fact[], emptyHint = "（没有匹配的记忆
     ? facts
         .map(
           (f) =>
-            `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}${supersedeTag(f)}`,
+            `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}${linkTag(f)}${supersedeTag(f)}`,
         )
         .join("\n")
     : emptyHint;
 // ---------- /memory：把记住的东西与图都画出来（终端友好的「树 + 边」） ----------
 
-export interface GraphView { lines: string[]; facts: number; entities: number; superseded: number; edges: number; conflicts: number }
+export interface GraphView { lines: string[]; facts: number; entities: number; superseded: number; edges: number; conflicts: number; typed: number }
 
 export interface SleepMarks {
   greenIds: Set<string>; // 睡眠中新增/修改的事实 id（图中标绿）
@@ -673,6 +742,8 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
   const sorted = [...byEntity.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   const replacedCount = (id: string) => replaceIndex().get(id)?.length ?? 0;
   const chainHeads = active.filter((f) => replacedCount(f.id) > 0).length;
+  /** typed 边（模型显式声明）——导航主路径；共现边降级为兜底 */
+  const typedEdges = active.flatMap((f) => (f.links ?? []).map((l) => ({ from: f.id, rel: l.rel, to: l.to })));
 
   // 实体间的边：同一条事实里的实体两两相连
   const edge = new Map<string, number>();
@@ -688,7 +759,8 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
 
     const cs = conflicts(scope); const lines: string[] = [];
   lines.push(
-    `记忆图：${active.length} 条事实 · ${byEntity.size} 个实体 · ${edge.size} 条关联` +
+    `记忆图：${active.length} 条事实 · ${byEntity.size} 个实体 · ${edge.size} 条关联(共现)` +
+      `${typedEdges.length ? ` · ${typedEdges.length} 条关系(typed)` : ""}` +
       // 诚实文案：已取代条**不经五查询返回**（全部经 activeFacts 过滤），只能直读真源
       `${superseded ? ` · ${superseded} 条被取代（保留可审计；五查询默认取不回，真源在 facts.jsonl）` : ""}` +
       `${chainHeads ? ` · ${chainHeads} 条接替了旧条（标 ←K，取代链在真源里）` : ""}` +
@@ -715,8 +787,15 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
     lines.push("", `○ 未挂实体 (${orphan.length})`);
     for (const f of orphan) lines.push(`  └─ [${f.id}] ${f.text}`);
   }
+  // 关系（typed）：模型显式声明的边 —— 导航主路径
+  if (typedEdges.length) {
+    lines.push("", `关系（typed，显式声明 ${typedEdges.length} 条）：`);
+    for (const e of typedEdges.slice(0, 24)) lines.push(`  ${e.from} --${e.rel}--> ${e.to}`);
+    if (typedEdges.length > 24) lines.push(`  … +${typedEdges.length - 24} 条`);
+  }
   if (edge.size) {
-    lines.push("", "实体关联（共享事实）：");
+    // 共现：降级为兜底（无类型、hub 会退化成完全图）
+    lines.push("", "关联（共现兜底，无类型）：");
     for (const [k, n] of [...edge.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
       lines.push(`  ${k}${n > 1 ? ` ×${n}` : ""}`);
     }
@@ -726,5 +805,5 @@ export function renderGraph(scope?: string, marks?: SleepMarks): GraphView {
     for (const c of cs) lines.push(`  ${c.reason}`, `    A [${c.a.id}] ${c.a.text} (by ${c.a.by})`, `    B [${c.b.id}] ${c.b.text} (by ${c.b.by})`);
   }
   lines.push("", `可手改：${MIRROR}`, `真源：${FACTS}`);
-  return { lines, facts: active.length, entities: byEntity.size, superseded, edges: edge.size, conflicts: cs.length };
+  return { lines, facts: active.length, entities: byEntity.size, superseded, edges: edge.size, conflicts: cs.length, typed: typedEdges.length };
 }

@@ -89,8 +89,10 @@ console.log("7) 工具层（九 op + 反馈）✓");
 
 // ── /memory 图
 const g = M.renderGraph();
-assert.ok(g.lines[0]!.includes("记忆图") && g.lines.some((l) => l.includes("实体关联")), "图含统计与关联边");
-console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.edges} 关联`);
+// 标签按任务书 §4.4 改名：共现区叫「关联（共现兜底）」、typed 区叫「关系（typed）」——两者必须可区分
+assert.ok(g.lines[0]!.includes("记忆图") && g.lines.some((l) => l.includes("关联（共现兜底")), "图含统计与共现兜底区");
+assert.ok(g.lines[0]!.includes("条关联(共现)"), "共现边计数应标明口径");
+console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.edges} 关联(共现) / ${g.typed} 关系(typed)`);
 
 // ── 会话命名与安全删除（/name · /resume 里两次 d）
 {
@@ -181,6 +183,83 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   assert.equal(M.supersedeTag(oldFact), ` · supersededBy:${neo.id}`, "旧条 tag 只含 supersededBy");
   assert.ok(!M.supersedeTag(neo).includes(oldFact.text.slice(0, 8)), "tag 不得携带旧正文");
   console.log("13) 取代立场暴露（replaces · supersededBy · 文案诚实 · ←K）✓");
+}
+
+// ── typed link（可选封闭词表边）：往返 · 归一化 · 非法拒绝 · 去重 · 换代继承 · 图分区 · 镜像不污染
+{
+  const a = M.addFact({ text: "typed 测试：根因 A 导致现象 B", entities: ["typed测试"], by: "bot" });
+  const b = M.addFact({ text: "typed 测试：现象 B 已观测", entities: ["typed测试"], by: "bot" });
+  const c = M.addFact({
+    text: "typed 测试：模块 C 依赖 A 并导致 B",
+    entities: ["typed测试"],
+    by: "bot",
+    links: [{ rel: "depends_on", to: a.id }, { rel: "leads_to", to: b.id }],
+  });
+  const fresh = (id: string) => M.loadFacts().find((f) => f.id === id)!;
+
+  // ① 往返：渲染带出 typed 出边；别名归一化；无同义词不炸
+  const line = M.renderFacts([fresh(c.id)]);
+  assert.ok(line.includes(`→depends_on:${a.id}`), "typed 出边应渲染为 →rel:id");
+  assert.ok(line.includes(`→causes:${b.id}`), "别名 leads_to 应归一化为 causes");
+  assert.equal(M.normalizeRel("LEADS-TO"), "causes", "归一化：大小写 + 连字符 + 别名");
+  assert.equal(M.normalizeRel("because"), undefined, "未知 rel 归一化为 undefined");
+
+  // ② 兼容：无 links 的条不带任何边标记，且字段缺省
+  assert.equal(M.linkTag(a), "", "无 links 的条不带边标记");
+  assert.equal(fresh(a.id).links, undefined, "未写 links 的事实不应凭空多出字段（旧条兼容）");
+
+  // ③ 非法与不合法写入全部拒绍
+  assert.throws(() => M.addFact({ text: "typed 测试：非法 rel", links: [{ rel: "because", to: a.id }] }), /非法 rel/, "未知 rel 应拒绍");
+  assert.throws(() => M.addFact({ text: "typed 测试：悬空 to", links: [{ rel: "causes", to: "nosuchid" }] }), /不存在/, "指向不存在 id 应拒绍");
+  assert.throws(
+    () =>
+      M.addFact({
+        text: "typed 测试：超限",
+        links: Array.from({ length: M.LINK_MAX + 1 }, (_, i) => ({ rel: "causes", to: i % 2 ? a.id : b.id })),
+      }),
+    /最多 8/,
+    "超过出边上限应拒绍",
+  );
+  // 重复 (rel,to) 静默去重（同一断言重说一遍无害）
+  const d = M.addFact({ text: "typed 测试：重复边去重", entities: ["typed测试"], links: [{ rel: "causes", to: a.id }, { rel: "causes", to: a.id }] });
+  assert.equal(fresh(d.id).links!.length, 1, "重复 (rel,to) 应去重");
+
+  // ④ 换代继承：supersede 未声明 links 时继承旧条出边（换代不是断链）
+  const c2 = M.supersedeFact(c.id, { text: "typed 测试：模块 C 换代", by: "bot" })!;
+  assert.ok(fresh(c2.id).links!.some((l) => l.to === a.id), "换代应继承旧条出边");
+  assert.ok(M.renderFacts([fresh(c2.id)]).includes(`→depends_on:${a.id}`), "继承后的边仍可渲染");
+
+  // ⑤ 与 supersede 去重：同一对上的 updates link 不重复打印
+  const o1 = M.addFact({ text: "typed 测试：旧认知", entities: ["typed去重"], by: "bot" });
+  const o2 = M.supersedeFact(o1.id, { text: "typed 测试：新认知", by: "bot", links: [{ rel: "updates", to: o1.id }] })!;
+  const l2 = M.renderFacts([fresh(o2.id)]);
+  assert.ok(l2.includes(`replaces:${o1.id}`), "supersede 方向仍要显示");
+  assert.ok(!l2.includes(`→updates:${o1.id}`), "同一对上的 updates link 应与 supersede 去重（不重复打印）");
+  // 但 updates link 可以是**非破坏性**的立场标记（不需真做 supersede）
+  const o3 = M.addFact({ text: "typed 测试：补充认知（不取代老条）", entities: ["typed去重"], links: [{ rel: "updates", to: o1.id }] });
+  assert.ok(M.renderFacts([fresh(o3.id)]).includes(`→updates:${o1.id}`), "无 supersede 时的 updates 边应照常渲染（双活跃也能标立场）");
+
+  // ⑥ 补边路径（重要）：to 必须先存在 → 「先写事实、事后才想连边」只能靠 re-remember 同文本补
+  //    （显式声明 links 时**替换**而非合并，正是为了让这条路径能改边/删边）
+  const late = M.addFact({ text: "typed 测试：先写后连", entities: ["typed补边"], by: "bot" });
+  assert.equal(fresh(late.id).links, undefined, "首写时无 links");
+  M.addFact({ text: "typed 测试：先写后连", entities: ["typed补边"], by: "bot", links: [{ rel: "depends_on", to: late.id === a.id ? b.id : a.id }] });
+  assert.ok((fresh(late.id).links ?? []).length === 1, "同文本 re-remember 应能补上出边（dup 分支替换 links）");
+  assert.ok(M.renderFacts([fresh(late.id)]).includes("→depends_on:"), "补的边应可渲染");
+
+  // ⑦ 图视图分区：typed 关系 vs 共现兜底
+  const g = M.renderGraph();
+  assert.ok(g.typed >= 3, `图视图应报告 typed 边数（得 ${g.typed}）`);
+  assert.ok(g.lines.some((l) => l.includes("关系（typed")), "应有 typed 关系区");
+  assert.ok(g.lines.some((l) => l.includes("关联（共现兜底")), "共现区应改名标明无类型");
+  assert.ok(g.lines.some((l) => l.includes(`--causes-->`)), "typed 区应画 from --rel--> to");
+  assert.ok(g.lines[0]!.includes("条关系(typed)"), "图头应含 typed 计数");
+
+  // ⑧ 镜像不污染：MEMORY.md 不得出现 typed 边（否则 importMirror 可能把注记当正文回灌）
+  const mirror = fs.readFileSync(M.mirrorPath(), "utf8");
+  assert.ok(!/→(causes|updates|depends_on|part_of|contradicts):/.test(mirror), "MEMORY.md 不得出现 typed 边");
+  assert.ok(!/--causes-->/.test(mirror), "MEMORY.md 不得出现边画法");
+  console.log("14) typed link（往返 · 归一化 · 非法拒绝 · 去重 · 换代继承 · 图分区 · 镜像不污染）✓");
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
