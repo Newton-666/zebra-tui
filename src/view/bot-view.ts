@@ -948,7 +948,11 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       acc = "（这一世的告别没能写出来——临终一轮没有产出。时间线在展开里。）";
       block.setProse(acc);
     } else {
-      block.setProse(acc.trim());
+      // 正常范围的超长**不截断**（校验会报“超长”给人看，全文仍进遗嘱）；
+      // 只有 runaway（> 档位上限 3 倍）才截断 —— 否则打字会拖到几分钟
+      const full = acc.trim();
+      const cap = scale.maxChars * 3;
+      block.setProse([...full].length > cap ? truncateBySentence(full, cap) : full);
     }
     touchSession(parent);
     state = "告别中";
