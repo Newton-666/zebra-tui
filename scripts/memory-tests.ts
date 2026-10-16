@@ -262,6 +262,59 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   console.log("14) typed link（往返 · 归一化 · 非法拒绝 · 去重 · 换代继承 · 图分区 · 镜像不污染）✓");
 }
 
+// ── 接线（P0）：bot 工具路径必须把 args.links 传进库层
+// 上一轮第 14 组只直调 addFact，盖不住「executeTool 丢掉 links」这个洞 → 本组专测工具路径
+{
+  const tool = async (args: Record<string, unknown>) => executeTool("memory", JSON.stringify(args), TMP);
+  const byText = (t: string) => M.loadFacts().find((f) => f.text === t)!;
+  const target = M.addFact({ text: "接线测试：目标事实", entities: ["接线测试"], by: "bot" });
+
+  // ① 工具路径 remember 带 links → 边真的写进去（曾经静默丢弃）
+  const r1 = await tool({ op: "remember", text: "接线测试：源（经工具）", entities: ["接线测试"], links: [{ rel: "depends_on", to: target.id }] });
+  assert.ok(r1.ok, "工具写入应成功");
+  const src = byText("接线测试：源（经工具）");
+  assert.equal(src.links?.length, 1, "工具路径必须把 links 传进库层（P0：曾经静默丢弃）");
+  assert.ok(M.renderFacts([src]).includes(`→depends_on:${target.id}`), "工具写入的边应可渲染");
+
+  // ② links: [] = 显式清空（不能与「没声明」混为一谈）
+  const r2 = await tool({ op: "remember", text: "接线测试：源（经工具）", entities: ["接线测试"], links: [] });
+  assert.ok(r2.ok, "传空数组应成功");
+  assert.equal(byText("接线测试：源（经工具）").links?.length, 0, "links:[] 应清空出边");
+
+  // ③ 不传 links 的 dup → 旧边必须还在
+  await tool({ op: "remember", text: "接线测试：源（经工具）", entities: ["接线测试"], links: [{ rel: "causes", to: target.id }] });
+  assert.equal(byText("接线测试：源（经工具）").links?.length, 1, "前置：先有一条边");
+  await tool({ op: "remember", text: "接线测试：源（经工具）", entities: ["接线测试"] });
+  assert.equal(byText("接线测试：源（经工具）").links?.length, 1, "不传 links 的 dup 不得清掉旧边");
+
+  // ④ 自环拒绝（同文补边时 to=自己）—— 错误必须可读
+  const selfLoop = await tool({ op: "remember", text: "接线测试：源（经工具）", entities: ["接线测试"], links: [{ rel: "causes", to: src.id }] });
+  assert.ok(!selfLoop.ok && /自环/.test(selfLoop.output), `自环应被拒（实际：${selfLoop.output}）`);
+
+  // ⑤ 库层抛错要回到工具层，不得吞掉
+  const bad = await tool({ op: "remember", text: "接线测试：非法 rel", links: [{ rel: "because", to: target.id }] });
+  assert.ok(!bad.ok && /非法 rel/.test(bad.output), "非法 rel 的错误应经工具返回");
+  const dangling = await tool({ op: "remember", text: "接线测试：悬空 to", links: [{ rel: "causes", to: "nosuchid" }] });
+  assert.ok(!dangling.ok && /不存在/.test(dangling.output), "悬空 to 的错误应经工具返回");
+
+  // ⑥ 非数组 links → 明确报错（**不能**当成 [] 处理，那等于静默清边）
+  const wrongType = await tool({ op: "remember", text: "接线测试：类型错", links: "causes:x" });
+  assert.ok(!wrongType.ok && /数组/.test(wrongType.output), `非数组 links 应明确报错（实际：${wrongType.output}）`);
+  assert.equal(M.loadFacts().filter((f) => f.text === "接线测试：类型错").length, 0, "报错时不得写库");
+
+  // ⑦ 工具路径 supersede：带 links → 新条有边；不带 → 继承旧条出边
+  const oldF = M.addFact({ text: "接线测试：旧认知", entities: ["接线测试"], by: "bot", links: [{ rel: "causes", to: target.id }] });
+  const rs = await tool({ op: "supersede", id: oldF.id, text: "接线测试：新认知", links: [{ rel: "depends_on", to: target.id }] });
+  assert.ok(rs.ok, "supersede 应成功");
+  assert.ok(/带 1 条边/.test(rs.output), "supersede 回执应提示带了边");
+  assert.deepEqual(byText("接线测试：新认知").links, [{ rel: "depends_on", to: target.id }], "显式 links 应原样落到新条");
+  const rs2 = await tool({ op: "supersede", id: byText("接线测试：新认知").id, text: "接线测试：再换代" });
+  assert.ok(rs2.ok, "第二次 supersede 应成功");
+  assert.equal(byText("接线测试：再换代").links?.length, 1, "未带 links 的 supersede 应继承旧条出边");
+
+  console.log("15) 工具接线（links 传递 · 清空 · dup 不动边 · 自环拒 · 错误可见 · supersede 带/继承）✓");
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log("\nALL MEMORY TESTS PASS");
 // ── 团队线接入记忆图：断言带 by+scope+evidence；conflicts(scope) 抓矛盾；团队/Bot 互不污染

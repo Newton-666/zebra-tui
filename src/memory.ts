@@ -200,16 +200,18 @@ export interface AddInput { text: string; entities?: string[]; by?: string; evid
 
 export function addFact(input: AddInput): Fact & { existed?: boolean } {
   const at = new Date().toISOString();
-  const links = validateLinks(input.links); // 写入前的唯一关卡（未知 rel / 不存在的 to / 自环 / 超限 → 抛错拒绝）
   // 一主题一条：同文本的活跃事实 → 更新原条（加强信任），不新增（否则重复记忆会淹没注入块）
   const key = `${input.scope ?? ""}\u0000${input.text.trim().toLowerCase()}`;
   const dup = activeFacts(loadFacts()).find((f) => `${f.scope ?? ""}\u0000${f.text.trim().toLowerCase()}` === key);
+  // 写入前的唯一关卡。自环校验用 dup 的 id（同文补边写成 to=自己是真实易犯的错；新建时 id 未生成，不可能自环）
+  const links = validateLinks(input.links, dup?.id);
+  // 看「字段是否出现」而不是长度：`links: []` 是**显式清空**，不能与「没声明」混为一谈
+  const hasLinks = input.links !== undefined;
   if (dup && key) {
     const trust = Math.min(1, dup.trust + 0.05);
-    // 显式声明了 links → 以本次声明为准（可借此重写/删除边）；没声明则不动原有边
-    append({ t: "fact_update", id: dup.id, patch: { updated: at, trust, ...(input.links?.length ? { links } : {}) } });
+    append({ t: "fact_update", id: dup.id, patch: { updated: at, trust, ...(hasLinks ? { links } : {}) } });
     writeMirror();
-    return { ...dup, trust, existed: true };
+    return { ...dup, trust, ...(hasLinks ? { links } : {}), existed: true };
   }
   const f: Fact = {
     id: rid(),

@@ -235,10 +235,21 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
       const op = String(args.op ?? "");
       const str = (v: unknown) => String(v ?? "").trim();
       const arr = (v: unknown) => (Array.isArray(v) ? v.map((x) => str(x)).filter(Boolean) : []);
+      /**
+       * links 的三种情况必须分清（错一种就是静默丢数据）：
+       * - 字段缺失 → undefined（dup / 更新时**不动**旧边）
+       * - 数组（含 `[]`）→ 原样传给库层（`[]` = **显式清空**）
+       * - 其它类型 → 明确报错（**不能**当空数组处理，那等于静默清边）
+       */
+      const linksArg = (v: unknown): { rel: string; to: string }[] | undefined => {
+        if (v === undefined || v === null) return undefined;
+        if (!Array.isArray(v)) throw new Error("links 需为数组 [{rel,to}]（清空请传 []）");
+        return v as { rel: string; to: string }[];
+      };
       if (op === "remember") {
         const text = str(args.text);
         if (!text) return { ok: false, output: "op=remember 需要 text" };
-        const f = addFact({ text, entities: arr(args.entities), evidence: str(args.evidence) || undefined, by: "bot" });
+        const f = addFact({ text, entities: arr(args.entities), evidence: str(args.evidence) || undefined, by: "bot", links: linksArg(args.links) });
         // 认知刷新提示：写入后回看同主实体的旧知（确定性检索）——若本条是更新/纠正，引导模型接着 supersede
         let hint = "";
         if (!f.existed && f.entities.length) {
@@ -266,8 +277,8 @@ export async function executeTool(name: string, rawArgs: string, cwd: string): P
       if (op === "supersede") {
         const text = str(args.text);
         if (!text) return { ok: false, output: "op=supersede 需要 text（新事实）" };
-        const f = supersedeFact(str(args.id), { text, entities: arr(args.entities), by: "bot" });
-        return f ? { ok: true, output: `已取代：新 [${f.id}] ${f.text}（旧条保留但不注入）` } : { ok: false, output: `找不到事实 ${str(args.id)}` };
+        const f = supersedeFact(str(args.id), { text, entities: arr(args.entities), by: "bot", links: linksArg(args.links) });
+        return f ? { ok: true, output: `已取代：新 [${f.id}] ${f.text}${f.links?.length ? `（带 ${f.links.length} 条边）` : ""}（旧条保留但不注入）` } : { ok: false, output: `找不到事实 ${str(args.id)}` };
       }
       if (op === "conflicts") {
         const cs = conflicts();
