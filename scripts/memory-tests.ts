@@ -315,6 +315,56 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   console.log("15) 工具接线（links 传递 · 清空 · dup 不动边 · 自环拒 · 错误可见 · supersede 带/继承）✓");
 }
 
+// ── 提取偏向结构：**先跟 typed 箭头，再跟实体共现**（票 memory-retrieval-prefer-typed）
+{
+  const E = "偏好测试";
+  const plain = M.addFact({ text: "偏好测试：无边的普通事实", entities: [E, "子实体X"], by: "bot" });
+  const target = M.addFact({ text: "偏好测试：被箭头指向的邻居", entities: ["子实体Y"], by: "bot" });
+  const anchor = M.addFact({ text: "偏好测试：带出边的锚点", entities: [E, "子实体Z"], by: "bot", links: [{ rel: "causes", to: target.id }] });
+  const cooc = M.addFact({ text: "偏好测试：共现邻居", entities: ["子实体X", "别处"], by: "bot" });
+  const inbound = M.addFact({ text: "偏好测试：指回锚点的事实", entities: ["别处2"], by: "bot", links: [{ rel: "depends_on", to: anchor.id }] });
+
+  // ① related：typed 邻居（出边 / 入边两个方向）排在共现邻居之前
+  const rel = M.related(E, 10);
+  const ids = rel.map((f) => f.id);
+  assert.ok(ids.includes(target.id) && ids.includes(cooc.id) && ids.includes(inbound.id), "typed 与共现邻居都应返回");
+  assert.ok(ids.indexOf(target.id) < ids.indexOf(cooc.id), "出边方向的 typed 邻居应排在共现邻居之前");
+  assert.ok(ids.indexOf(inbound.id) < ids.indexOf(cooc.id), "入边方向的 typed 邻居应排在共现邻居之前");
+
+  // ② 标记：出边方向靠 via（←rel:baseId）；入边方向靠它自己的 linkTag（→rel:baseId），不重复
+  const tLine = M.renderFacts(rel.filter((f) => f.id === target.id));
+  assert.ok(tLine.includes(`←causes:${anchor.id}`), "出边邻居应标 via ←rel:baseId");
+  const iLine = M.renderFacts(rel.filter((f) => f.id === inbound.id));
+  assert.ok(iLine.includes(`→depends_on:${anchor.id}`), "入边邻居应靠自己的 linkTag 表达方向");
+  assert.ok(!iLine.includes("←depends_on"), "入边邻居不应重复打 via");
+  assert.ok(!/ · ←/.test(M.renderFacts([M.loadFacts().find((f) => f.id === plain.id)!])), "普通事实不得凭空多出 via");
+
+  // ③ about：同一实体下「有 typed 边」的排在只有共现的前面（hub 下先看见结构）
+  const ab = M.about(E, 10).map((f) => f.id);
+  assert.ok(ab.indexOf(anchor.id) < ab.indexOf(plain.id), "带 typed 边的事实应排在无边事实之前");
+
+  // ④ recall：**只在得分持平时**偏向结构（主排序不动，不伤召回精度）
+  const tie1 = M.addFact({ text: "偏好测试：tiebreakword 第一条", entities: ["并列甲"], by: "bot" });
+  const tie2 = M.addFact({ text: "偏好测试：tiebreakword 第二条", entities: ["并列乙"], by: "bot", links: [{ rel: "causes", to: tie1.id }] });
+  const rr = M.recall("tiebreakword", 5);
+  assert.ok(rr.length >= 2, "两条都应被召回");
+  assert.equal(rr[0]!.id, tie2.id, "得分持平时，跟 typed 边的那条优先");
+
+  // ⑤ 无边时行为与改前一致（纯共现兜底）：创建序返回、related 仍能找到共现邻居
+  const F = "无边测试";
+  const f1 = M.addFact({ text: "无边测试：第一条", entities: [F, "共享甲"], by: "bot" });
+  const f2 = M.addFact({ text: "无边测试：第二条", entities: [F], by: "bot" });
+  const f3 = M.addFact({ text: "无边测试：第三条", entities: [F], by: "bot" });
+  assert.deepEqual(
+    M.about(F, 10).map((x) => x.id),
+    [f1.id, f2.id, f3.id],
+    "无边时 about 应保持创建序（与改前逐字节一致）",
+  );
+  const fCooc = M.addFact({ text: "无边测试：共现邻居", entities: ["共享甲"], by: "bot" });
+  assert.ok(M.related(F, 10).some((x) => x.id === fCooc.id), "无边时 related 仍靠共现兜底");
+  console.log("16) 提取偏向结构（typed 邻居优先 · via 标记 · about 偏结构 · recall 持平偏向 · 无边回归）✓");
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log("\nALL MEMORY TESTS PASS");
 // ── 团队线接入记忆图：断言带 by+scope+evidence；conflicts(scope) 抓矛盾；团队/Bot 互不污染

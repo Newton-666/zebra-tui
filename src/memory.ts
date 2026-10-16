@@ -23,6 +23,9 @@ export interface Fact {
   /** 可选 typed link（出边）：本条自己声明的「与别的哪条事实是什么关系」。
    *  旧条无此字段 ≡ 无出边，完全兼容（真源仍是 append-only facts.jsonl） */
   links?: Link[];
+  /** **仅读路径**的视图标记：本条**为什么被返回**（如 `←causes:<来源id>`）。
+   *  只由 `related()` 在返回邻居时浅拷贝挂上；**绝不落盘**（没有任何写路径会整对象回写） */
+  via?: string;
 }
 
 /** typed link 的**封闭词表**（≤5）。硬的只是词表边界（未知 rel 一律拒绝），不是「必须写」 */
@@ -196,6 +199,43 @@ export function linkTag(f: Fact, limit = 3): string {
   return ` · ${head}${links.length > limit ? ` · +${links.length - limit}` : ""}`;
 }
 
+/**
+ * typed 边索引（读侧，与 loadFacts 共用 mtime:size 签名缓存）：
+ * - `out`：活跃条声明的出边
+ * - `in` ：被哪些活跃条指向（入边 → 检索时可反向跟箭头）
+ * - `structured`：参与过任何 typed 边的事实集合（作为源或目标）→ **提取偏向**的依据
+ */
+export interface LinkIndex {
+  out: Map<string, Link[]>;
+  in: Map<string, { rel: RelType; from: string }[]>;
+  structured: Set<string>;
+}
+let linkIdxCache: { key: string; idx: LinkIndex } | undefined;
+function linkIndex(): LinkIndex {
+  const facts = loadFacts();
+  const key = cache?.key ?? "";
+  if (linkIdxCache && linkIdxCache.key === key) return linkIdxCache.idx;
+  const out = new Map<string, Link[]>();
+  const inbound = new Map<string, { rel: RelType; from: string }[]>();
+  const structured = new Set<string>();
+  for (const f of activeFacts(facts)) {
+    const links = f.links ?? [];
+    if (!links.length) continue;
+    out.set(f.id, links);
+    structured.add(f.id);
+    for (const l of links) {
+      inbound.set(l.to, [...(inbound.get(l.to) ?? []), { rel: l.rel, from: f.id }]);
+      structured.add(l.to); // 目标也算「参与结构」（即使它已退役：它出现在活跃边的另一端）
+    }
+  }
+  linkIdxCache = { key, idx: { out, in: inbound, structured } };
+  return linkIdxCache.idx;
+}
+
+/** 提取偏向结构的稳定排序键：参与 typed 边的排在只有共现的之前（组内保持原序/创建序） */
+const preferStructured = (a: Fact, b: Fact, idx: LinkIndex): number =>
+  (idx.structured.has(b.id) ? 1 : 0) - (idx.structured.has(a.id) ? 1 : 0);
+
 export interface AddInput { text: string; entities?: string[]; by?: string; evidence?: string; trust?: number; scope?: string; links?: { rel: string; to: string }[] }
 
 export function addFact(input: AddInput): Fact & { existed?: boolean } {
@@ -294,40 +334,76 @@ const score = (f: Fact, ts: string[]) => {
 
 export function recall(query: string, limit = 6, scope?: string): Fact[] {
   const ts = toks(query);
+  const idx = linkIndex();
   return activeFacts(loadFacts()).filter((f) => !scope || f.scope === scope)
     .map((f) => ({ f, s: score(f, ts) }))
     .filter((x) => x.s > 0)
-    .sort((a, b) => b.s - a.s || (a.f.created < b.f.created ? 1 : -1))
+    // 提取偏向结构：**只在得分持平时**把跟 typed 边的那条提前（不动主排序，不伤召回精度）
+    .sort((a, b) => b.s - a.s || preferStructured(a.f, b.f, idx) || (a.f.created < b.f.created ? 1 : -1))
     .slice(0, limit)
     .map((x) => x.f);
 }
 
-export const about = (entity: string, limit = 8, scope?: string): Fact[] =>
-  activeFacts(loadFacts())
-    .filter((f) => !scope || f.scope === scope)
-    .filter((f) => f.entities.some((e) => e.toLowerCase().includes(entity.toLowerCase())))
-    .slice(0, limit);
-
-/** 一跳邻居：与「关于 entity 的事实」共享其他实体的事实 */
-export function related(entity: string, limit = 8, scope?: string): Fact[] {
-  const base = about(entity, 8, scope);
-  const baseIds = new Set(base.map((f) => f.id));
-  const shared = new Set(base.flatMap((f) => f.entities.map((e) => e.toLowerCase())).filter((e) => !e.includes(entity.toLowerCase())));
+export const about = (entity: string, limit = 8, scope?: string): Fact[] => {
+  const idx = linkIndex();
   return activeFacts(loadFacts())
     .filter((f) => !scope || f.scope === scope)
-    .filter((f) => !baseIds.has(f.id) && f.entities.some((e) => shared.has(e.toLowerCase())))
+    .filter((f) => f.entities.some((e) => e.toLowerCase().includes(entity.toLowerCase())))
+    // 提取偏向结构：同一实体下事实很多时（hub），先把「有 typed 边」的摆出来（稳定排序，组内保持创建序）
+    .sort((a, b) => preferStructured(a, b, idx))
     .slice(0, limit);
+};
+
+/**
+ * 一跳邻居：**先跟 typed 箭头，再跟实体共现**（票 memory-retrieval-prefer-typed）。
+ * - typed 邻居 = base 的出边目标（标 `←rel:baseId`）+ 指向 base 的入边来源
+ *   （后者不需要标记：它自己的 linkTag 已写了 `→rel:baseId`，不重复）
+ * - 共现邻居 = 与 base 共享其它实体的事实（**兜底**，排在 typed 之后）
+ * - 只返回**活跃**条：指向已退役条的边不展开（查询口径仍是活跃集；历史从头条的 replaces 看）
+ */
+export function related(entity: string, limit = 8, scope?: string): Fact[] {
+  const all = activeFacts(loadFacts()).filter((f) => !scope || f.scope === scope);
+  const byId = new Map(all.map((f) => [f.id, f]));
+  const base = about(entity, 8, scope);
+  const baseIds = new Set(base.map((f) => f.id));
+  const idx = linkIndex();
+
+  const typed: Fact[] = [];
+  const seen = new Set<string>();
+  for (const b of base) {
+    for (const l of idx.out.get(b.id) ?? []) {
+      const n = byId.get(l.to);
+      if (!n || baseIds.has(n.id) || seen.has(n.id)) continue;
+      seen.add(n.id);
+      typed.push({ ...n, via: `←${l.rel}:${b.id}` });
+    }
+  }
+  for (const b of base) {
+    for (const e of idx.in.get(b.id) ?? []) {
+      const n = byId.get(e.from);
+      if (!n || baseIds.has(n.id) || seen.has(n.id)) continue;
+      seen.add(n.id);
+      typed.push(n);
+    }
+  }
+
+  const shared = new Set(base.flatMap((f) => f.entities.map((e) => e.toLowerCase())).filter((e) => !e.includes(entity.toLowerCase())));
+  const cooc = all.filter((f) => !baseIds.has(f.id) && !seen.has(f.id) && f.entities.some((e) => shared.has(e.toLowerCase())));
+  return [...typed, ...cooc].slice(0, limit);
 }
 
 /** 交集：同时关联两实体的事实 */
-export const connect = (a: string, b: string, limit = 8, scope?: string): Fact[] =>
-  activeFacts(loadFacts())
+export const connect = (a: string, b: string, limit = 8, scope?: string): Fact[] => {
+  const idx = linkIndex();
+  return activeFacts(loadFacts())
     .filter((f) => !scope || f.scope === scope)
     .filter((f) => {
       const es = f.entities.map((e) => e.toLowerCase());
       return es.some((e) => e.includes(a.toLowerCase())) && es.some((e) => e.includes(b.toLowerCase()));
     })
+    .sort((x, y) => preferStructured(x, y, idx))
     .slice(0, limit);
+};
 
 /** 矛盾启发式：同一实体下，文本里出现相反词对 → 视为潜在冲突（确定性、可审计） */
 // 只保留「强相反」词对（去掉 是/有 这类单字词——实测一次误报 8 处，太吵）
@@ -719,7 +795,7 @@ export const renderFacts = (facts: Fact[], emptyHint = "（没有匹配的记忆
     ? facts
         .map(
           (f) =>
-            `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}${linkTag(f)}${supersedeTag(f)}`,
+            `[${f.id}] ${f.text}${f.entities.length ? `  [${f.entities.join(", ")}]` : ""}${f.evidence ? `  (${f.evidence})` : ""} · trust ${f.trust.toFixed(2)} · by ${f.by}${f.via ? ` · ${f.via}` : ""}${linkTag(f)}${supersedeTag(f)}`,
         )
         .join("\n")
     : emptyHint;
