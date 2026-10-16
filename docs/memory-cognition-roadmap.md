@@ -71,3 +71,4 @@
 - 阶段 1：`memory-expose-supersede*.md`
 - 阶段 2：`memory-typed-links*.md` / `memory-typed-links-wire-fix*.md`
 - 设计：`agent-spec.md` · 决策图：`compaction-graph.md`
+- 未了 · 死亡仪式（设计定稿，未实现）：`memory-death-ceremony.md`
