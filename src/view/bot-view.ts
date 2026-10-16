@@ -895,7 +895,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         stopFarewell();
         settleFarewell(parent, block, timeline, scale);
       }
-      tui.requestRender();
+      refresh(); // 块在长高 → 必须重算滚动布局（只 requestRender 会让新行落不进视口）
     }, 50);
     farewellTimer.unref?.();
 
@@ -929,6 +929,11 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
           });
         } else if (e.type === "usage") {
           appendEvent(parent, { t: "usage", at: new Date().toISOString(), prompt: e.prompt, cached: e.cached, completion: e.completion, model: cfg.model });
+        } else if (e.type === "final") {
+          if (!acc.trim() && e.text.trim()) {
+            acc = e.text; // 兜底：模型没走流式增量（少见）
+            block.setProse(acc);
+          }
         } else if (e.type === "error") {
           // 降级必须可见：不假装写出了告别
           acc = `（这一世的告别没能写出来——临终一轮失败：${e.message}。时间线在展开里。）`;
@@ -958,6 +963,15 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     scale: ReturnType<typeof lifeScale>,
   ): void => {
     const prose = block.proseText;
+    // 兜底：散文为空（不该发生——skip 已被拦住、回合结束会塞 fallback）→ 不写空遗嘱、不重生
+    if (!prose.trim()) {
+      push(dim("  · 告别没有产出（散文为空）——本次不写遗嘱、也不重生；可再试一次 /farewell"), "");
+      stopFarewell();
+      busy = false;
+      state = "空闲";
+      refresh();
+      return;
+    }
     const check = validateEulogy(prose, { timeline, scale, facts: loadFacts() });
     const file = writeEulogy({
       at: new Date().toISOString(),
@@ -971,8 +985,6 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     refresh();
     // 校验未过是**给人看**的（机器只筛掉假的；真的动人由人打分）
     if (!check.ok) push(dim(`  · 告别校验：${check.problems.length} 项待人工复核（已写进遗嘱）`), "");
-    busy = false;
-    state = "空闲";
     const life = (loadBotMeta(parent)?.life ?? 1) + 1;
     setTimeout(() => rebirth(parent, life), FAREWELL.rebirthMs);
   };

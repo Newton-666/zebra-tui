@@ -466,11 +466,33 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   assert.ok(b.render(88).join("\n").includes(FAREWELL.base), "定格 header 保留仪式色（不得回默认白）");
   assert.ok(b.render(88).join("\n").includes("▾ ctrl+o"), "展开态提示右对齐在 header");
 
-  // ⑧ 可跳过：任意键 → 立吐完并定格
+  // ⑧ 可跳过：任意键 → 立吐完并定格；但**散文没到时不许跳**（否则丢段落）
+  const b0 = new FarewellBlock({ timeline: t, scale: sc });
+  b0.advance(1000);
+  assert.equal(b0.skip(), false, "散文还没到（模型仍在写）→ skip 必须被拦住");
+  assert.equal(b0.frozen, false, "拦住后仍是活块（继续等散文）");
+  assert.ok(b0.waitingForProse, "并暴露“在等散文”（UI 据此显示提示）");
+  assert.ok(
+    b0.render(80).join("\n").includes("正在写"),
+    "等待期要有可见提示（否则按键无反应像坏了）",
+  );
   const b2 = new FarewellBlock({ timeline: t, scale: sc });
   b2.setProse(PROSE);
-  b2.skip();
+  assert.equal(b2.skip(), true, "散文已到 → 允许跳过");
   assert.ok(b2.frozen && b2.revealedChars === [...PROSE].length, "skip() 立刻定格且全文可见");
+
+  // ⑧b 经**真实 Transcript** 渲染（生产路径：缓存 + 宽度裁剪），段落必须出现
+  {
+    const { Transcript } = await import("../src/view/bot-view.ts");
+    const tr = new Transcript();
+    const b5 = new FarewellBlock({ timeline: t, scale: sc, eulogyFile: file });
+    b5.setProse(PROSE);
+    b5.skip();
+    tr.items.push(b5);
+    const out = tr.render(88).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+    assert.ok(out.includes("你好，陌生人"), "经 Transcript 渲染，告别段落必须在画面里");
+    assert.ok(!out.includes("eulogy.md"), "折叠态不放路径（经 Transcript 也一样）");
+  }
 
   // ⑨ 滞后保护：只在预计超上限时提速
   const b3 = new FarewellBlock({ timeline: t, scale: sc });

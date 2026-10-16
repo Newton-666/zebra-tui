@@ -67,9 +67,19 @@ export class FarewellBlock implements Component {
     this.phase = "frozen";
     this.rev++;
   }
-  /** 任意键：立刻吐完并定格 */
-  skip(): void {
+  /**
+   * 任意键：立刻吐完并定格。
+   * ⚠ 散文**还没到**（模型仍在写）时**不允许**跳过 —— 否则会冻结成空的，
+   * 界面上只有 header 与「我熄灯了。」、看不到告别段落（2026-10-16 实测踩到）。
+   */
+  skip(): boolean {
+    if (!this.prose.trim()) return false;
     this.freeze();
+    return true;
+  }
+  /** 正在等模型写完散文（用于状态提示） */
+  get waitingForProse(): boolean {
+    return !this.prose.trim() && this.phase !== "frozen";
   }
   get frozen(): boolean {
     return this.phase === "frozen";
@@ -172,6 +182,9 @@ export class FarewellBlock implements Component {
     const out: string[] = [this.head(w)];
     const gutter = `     ${dim("│")}  `;
     if (this.phase !== "sweep") out.push(`     ${dim("│")}  ${fg(FAREWELL.lead, FAREWELL.lead2)}`);
+
+    // 等模型写完时给个可见提示（否则用户按键无反应、以为坏了）
+    if (this.waitingForProse && this.phase !== "sweep") out.push(`     ${dim("│")}  ${dim("（正在写……）")}`);
 
     // 散文（按已吐出的字数裁切；按宽度折行）
     const shown = [...this.prose].slice(0, this.revealed).join("");
