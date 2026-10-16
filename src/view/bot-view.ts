@@ -954,6 +954,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       const cap = scale.maxChars * 3;
       block.setProse([...full].length > cap ? truncateBySentence(full, cap) : full);
     }
+    block.markProseComplete(); // 定稿：此后才允许定格/跳过生效
     touchSession(parent);
     state = "告别中";
     refresh();
@@ -989,8 +990,24 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     refresh();
     // 校验未过是**给人看**的（机器只筛掉假的；真的动人由人打分）
     if (!check.ok) push(dim(`  · 告别校验：${check.problems.length} 项待人工复核（已写进遗嘱）`), "");
+    // **不自动重生**（owner 2026-10-16）：全部显示完之后给一个弹窗，由人决定何时开新的一世
+    busy = false;
+    state = "空闲";
     const life = (loadBotMeta(parent)?.life ?? 1) + 1;
-    setTimeout(() => rebirth(parent, life), FAREWELL.rebirthMs);
+    const picker = new ListOverlay({
+      title: `这一世已经写下来了（第 ${life} 世准备好了）`,
+      hint: "↑↓ 选择 · enter 确认 · esc 稍后再说",
+      items: [
+        { value: "go", label: `开始第 ${life} 世`, description: "开新会话；开场会带上「上一世我记得：…」" },
+        { value: "stay", label: "留在这里", description: "不做任何事（想再来一次可以再敲 /farewell，或稍后 /new）" },
+      ],
+      onPick: (v) => {
+        closeOverlay();
+        if (v === "go") rebirth(parent, life);
+      },
+      onCancel: closeOverlay,
+    });
+    openOverlay(picker, 84);
   };
 
   /** 重生：新的一世（`prev` 记住从哪来 —— §13） */
@@ -1642,8 +1659,9 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         tui.requestRender();
         return;
       }
-      // 仪式进行中：任意键 → 立刻吐完并定格（票 §5.5“可跳过”）；ctrl+c 已在上面处理
-      {
+      // 仪式进行中：enter / space / esc → 跳过（**非破坏性**：只加速不截断）
+      // 其余按键照常交给编辑器/滚动 —— 避免误触把告别弄断（2026-10-16 owner 实测踩到）
+      if (matchesKey(data, "enter") || matchesKey(data, "space") || matchesKey(data, "escape")) {
         const live = transcript.items.find((i) => i instanceof FarewellBlock && !i.frozen);
         if (live instanceof FarewellBlock) {
           live.skip();

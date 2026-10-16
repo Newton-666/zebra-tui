@@ -19,7 +19,6 @@ export const FAREWELL = {
   charMs: Number(process.env.KRYSTAL_FAREWELL_CHAR_MS ?? 90), // 每字（≈11 字/秒）
   silenceMs: 1800, // 散文吐完 → 最后一句话之间的**静默**
   footerMs: 900, // 落最后一句话 → 定格
-  rebirthMs: 2500, // 定格 → 自动重生前的停留（让人读完）
   maxMs: Number(process.env.KRYSTAL_FAREWELL_MAX_MS ?? 45_000), // 总时长上限（只有会超才提速）
   lastWords: "我熄灯了。",
   lead2: "你还记得吗——",
@@ -43,6 +42,10 @@ export class FarewellBlock implements Component {
 
   private prose = "";
   private revealed = 0;
+  /** 散文是否已写完（模型回合结束由调用方标记；未完成前**绝不定格**） */
+  private complete = false;
+  /** 用户按了跳过：不截断，改成“等散文到齐后立刻全显” */
+  private fastForward = false;
   private acc = 0; // 累积毫秒
   private phase: Phase = "sweep";
   private sweepTick = 0;
@@ -60,6 +63,11 @@ export class FarewellBlock implements Component {
     this.prose = text;
     this.rev++;
   }
+  /** 模型回合结束：散文已定稿（此后才允许定格 / 跳过生效） */
+  markProseComplete(): void {
+    this.complete = true;
+    this.rev++;
+  }
   /** 定格（可带权威全文，校准流式尾部差异） */
   freeze(full?: string): void {
     if (full && full.trim()) this.prose = full.trim();
@@ -68,12 +76,17 @@ export class FarewellBlock implements Component {
     this.rev++;
   }
   /**
-   * 任意键：立刻吐完并定格。
-   * ⚠ 散文**还没到**（模型仍在写）时**不允许**跳过 —— 否则会冻结成空的，
-   * 界面上只有 header 与「我熄灯了。」、看不到告别段落（2026-10-16 实测踩到）。
+   * 跳过：**非破坏性** —— 只加速，不截断。
+   * - 散文还没写完（模型仍在流式）→ 记下“快进”，等定稿后立刻全显（**绝不**定格在已到达的那几个字）
+   * - 已定稿 → 立刻全显并定格
+   * 返回是否当场定格。（2026-10-16 教训：旧实现会截断成“只显示了三个字”）
    */
   skip(): boolean {
-    if (!this.prose.trim()) return false;
+    if (!this.complete) {
+      this.fastForward = true;
+      this.rev++;
+      return false;
+    }
     this.freeze();
     return true;
   }
@@ -106,6 +119,11 @@ export class FarewellBlock implements Component {
    */
   advance(ms: number): void {
     if (this.phase === "frozen") return;
+    // 快进：散文已定稿 → 全显并定格（不逐字）
+    if (this.fastForward && this.complete) {
+      this.freeze();
+      return;
+    }
     this.acc += ms;
     this.rev++;
     const total = () => [...this.prose].length;
@@ -133,7 +151,7 @@ export class FarewellBlock implements Component {
           this.revealed = Math.min(total(), this.revealed + step);
           this.acc -= FAREWELL.charMs;
         }
-        if (this.revealed < total()) return;
+        if (this.revealed < total() || !this.complete) return; // 未定稿不动 → 绝不定格
         this.phase = "silence";
       } else if (this.phase === "silence") {
         if (this.acc < FAREWELL.silenceMs) return;

@@ -443,6 +443,7 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   const step = (ms: number) => { for (let w = 0; w < ms; w += 50) b.advance(50); }; // 50ms 步进 = 生产时钟
   step(1000); // 扫光一个周期
   b.setProse(PROSE);
+  b.markProseComplete(); // 模型回合结束（生产里由 runFarewell 标记）
   step(FAREWELL.leadMs);
   const seen: number[] = [];
   for (let i = 0; i < 8; i++) { b.advance(FAREWELL.charMs); seen.push(b.revealedChars); }
@@ -469,16 +470,30 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   // ⑧ 可跳过：任意键 → 立吐完并定格；但**散文没到时不许跳**（否则丢段落）
   const b0 = new FarewellBlock({ timeline: t, scale: sc });
   b0.advance(1000);
-  assert.equal(b0.skip(), false, "散文还没到（模型仍在写）→ skip 必须被拦住");
-  assert.equal(b0.frozen, false, "拦住后仍是活块（继续等散文）");
+  assert.equal(b0.skip(), false, "散文未定稿 → skip 不立即定格（只记快进）");
+  assert.equal(b0.frozen, false, "不得冻结（否则会截断）");
   assert.ok(b0.waitingForProse, "并暴露“在等散文”（UI 据此显示提示）");
-  assert.ok(
-    b0.render(80).join("\n").includes("正在写"),
-    "等待期要有可见提示（否则按键无反应像坏了）",
+  assert.ok(b0.render(80).join("\n").includes("正在写"), "等待期要有可见提示（否则按键无反应像坏了）");
+
+  // ★ 回归（2026-10-16 owner 实测：只显示了三个字）：流式只到了几个字时按键，
+  //   后续文字到达**不得丢失** —— skip 只加速不截断
+  const b6 = new FarewellBlock({ timeline: t, scale: sc });
+  b6.advance(1000);
+  b6.setProse("这一世"); // 模型刚吐出三个字
+  assert.equal(b6.skip(), false, "此时按键：不截断");
+  b6.setProse("这一世，我们把闸门交给系统，也把记忆连长出了方向。"); // 后续继续到达
+  b6.markProseComplete();
+  b6.advance(50);
+  assert.ok(b6.frozen, "定稿后快进生效 → 定格");
+  assert.equal(
+    b6.revealedChars,
+    [..."这一世，我们把闸门交给系统，也把记忆连长出了方向。"].length,
+    "全文可见（不再只剩三个字）",
   );
   const b2 = new FarewellBlock({ timeline: t, scale: sc });
   b2.setProse(PROSE);
-  assert.equal(b2.skip(), true, "散文已到 → 允许跳过");
+  b2.markProseComplete();
+  assert.equal(b2.skip(), true, "散文已定稿 → 跳过当场定格");
   assert.ok(b2.frozen && b2.revealedChars === [...PROSE].length, "skip() 立刻定格且全文可见");
 
   // ⑧b 经**真实 Transcript** 渲染（生产路径：缓存 + 宽度裁剪），段落必须出现
@@ -487,6 +502,7 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
     const tr = new Transcript();
     const b5 = new FarewellBlock({ timeline: t, scale: sc, eulogyFile: file });
     b5.setProse(PROSE);
+    b5.markProseComplete();
     b5.skip();
     tr.items.push(b5);
     const out = tr.render(88).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
@@ -528,7 +544,9 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
     .replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert.ok(bv.includes("openFarewellConfirm") && bv.includes("new FarewellBlock"), "命令与放映块必须接线");
   assert.ok(/appendEvent\(parent,[\s\S]{0,200}?content: dyingInstruction/.test(bv), "临终指令走 user 尾巴（appendEvent，不碰 SYSTEM）");
-  assert.ok(bv.includes("stopFarewell") && bv.includes("FAREWELL.rebirthMs"), "仪式时钟可停 + 定格后重生");
+  assert.ok(bv.includes("stopFarewell"), "仪式时钟可停（退出/定稿都要收掉）");
+  assert.ok(!/setTimeout\(\s*\(\)\s*=>\s*rebirth/.test(bv), "**不得自动重生**（owner 2026-10-16：改为弹窗确认）");
+  assert.ok(bv.includes("rebirth(parent, life)") && /开始第 \$\{life\} 世/.test(bv), "重生走弹窗确认");
   assert.ok(bv.includes('i instanceof FarewellBlock'), "ctrl+o 必须覆盖放映块");
   const spec = fs.readFileSync(new URL("../src/bot.ts", import.meta.url), "utf8");
   assert.ok(!spec.includes("告别仪式"), "SYSTEM 不得改动（临终指令不进 system prompt）");
