@@ -3,3 +3,4 @@ deps/
 sessions/
 *.log
 .DS_Store
+scripts/eval-out/

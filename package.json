@@ -15,6 +15,7 @@
     "test:commands": "node --experimental-strip-types --no-warnings scripts/bot-command-tests.ts",
     "test:divert": "node --experimental-strip-types --no-warnings scripts/bot-divert-tests.ts",
     "test:login": "node --experimental-strip-types --no-warnings scripts/bot-login-tests.ts",
+    "eval:memory": "node --experimental-strip-types --no-warnings scripts/memory-eval.ts",
     "guard": "node --experimental-strip-types --no-warnings scripts/harness-guard.ts"
   }
 }
