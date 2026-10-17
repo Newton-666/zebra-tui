@@ -549,7 +549,11 @@ console.log(`8) /memory 图 ✓ ${g.facts} 事实 / ${g.entities} 实体 / ${g.e
   assert.ok(/openRebirthConfirm\(/.test(bv) && /开始第 \$\{life\} 世/.test(bv) && /rebirth\(deadSession, life\)/.test(bv), "重生走弹窗确认（openRebirthConfirm → rebirth）");
   assert.ok(bv.includes("i instanceof FarewellBlock"), "ctrl+o 必须覆盖放映块");
   // 死掉的一世不该还能说话：正文消息必须被拒（并把意图转成“要开新的一世吗”），且不第二次 farewell
-  assert.ok(/hasFarewelled\(sessionId\)[\s\S]{0,200}?openRebirthConfirm\(sessionId\)/.test(bv), "告别过的会话必须拒绝正文消息（转成重生确认）");
+  assert.ok(/hasFarewelled\(\)[\s\S]{0,200}?openRebirthConfirm\(sessionId\)/.test(bv), "告别过的会话必须拒绝正文消息（转成重生确认）");
+  // 热路径不许读盘：告别判定必须是内存标记（曾每次回车 loadEulogy 读文件 ≈16µs）
+  assert.ok(/let farewelled = loadEulogy\(sessionId\) !== undefined/.test(bv), "告别判定要有内存标记（初值只读一次）");
+  assert.ok(/const hasFarewelled = \(\): boolean => farewelled/.test(bv), "判定走标记");
+  assert.ok(!/hasFarewelled\(sessionId\)/.test(bv), "不得按会话 id 在每次提交时读盘");
   assert.ok(/cmd === "farewell"[\s\S]{0,120}?hasFarewelled/.test(bv), "告别过的会话不得再次 /farewell");
   assert.ok(/const prevId = sessionId[\s\S]{0,200}?prev: prevId/.test(bv), "/new 也要带 life/prev（否则新一世认不出上一世）");
   const spec = fs.readFileSync(new URL("../src/bot.ts", import.meta.url), "utf8");

@@ -447,6 +447,8 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
   // ── 会话：续聊则重放事件（与中断前同一前缀 → 缓存立刻恢复），否则新开一个
   const resumed = resumeId ? loadBotMeta(resumeId) : undefined;
   let sessionId = resumed?.id ?? createBotSession({ cwd, model: cfg?.model ?? "", tier: "写作者" }).id;
+  // 这一世是否已告别：**内存标记**（不要每次回车都去读 eulogy.md —— 那是把读盘放进每轮热路径）
+  let farewelled = loadEulogy(sessionId) !== undefined;
   let usage = resumed ? lastUsage(loadEvents(sessionId)) : undefined;
   let sessionName: string | undefined = resumed ? loadBotMeta(sessionId)?.name : undefined; // /name 设置
   let picker: SelectList | undefined;
@@ -573,6 +575,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     // §7：这一世若告别过 → 把放映块重放出来（它在生命的最末尾，位置本来就对）
     // 只重放**散文**（时间线已在 eulogy.md 里；展开态可对照），不参与任何写盘
     const eu = loadEulogy(id);
+    farewelled = eu !== undefined; // 切会话时重算一次（唯一会读盘的地方）
     if (eu) {
       const tl = buildTimeline(evs, loadFacts());
       const b = new FarewellBlock({ timeline: tl, scale: lifeScale(tl), eulogyFile: eulogyPath(id) });
@@ -987,6 +990,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
       check,
     });
     block.eulogyFile = file;
+    farewelled = true; // 写入即置位（此后本会话不再接受消息）
     refresh();
     // 校验未过是**给人看**的（机器只筛掉假的；真的动人由人打分）
     if (!check.ok) push(dim(`  · 告别校验：${check.problems.length} 项待人工复核（已写进遗嘱）`), "");
@@ -1015,13 +1019,14 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     openOverlay(picker, 84);
   };
 
-  /** 这一世是否已经告别过（eulogy.md 就是墓志；无需新字段） */
-  const hasFarewelled = (id: string): boolean => loadEulogy(id) !== undefined;
+  /** 这一世是否已经告别过（eulogy.md 就是墓志；无需新字段）。走内存标记 → 每轮零 I/O */
+  const hasFarewelled = (): boolean => farewelled;
 
   /** 重生：新的一世（`prev` 记住从哪来 —— §13） */
   const rebirth = (prevId: string, life: number): void => {
     stopFarewell();
     sessionId = createBotSession({ cwd, model: cfg?.model ?? "", tier: "写作者", life, prev: prevId }).id;
+    farewelled = false; // 新的一世：从头开始
     transcript.items = [...introWithLife(cfg?.model ?? "", cwd), ""];
     transcript.invalidate();
     usage = undefined;
@@ -1539,6 +1544,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         runningDiverts.clear();
         // /new = 无仪式的“立刻换一世”：同样带 life/prev（否则新一世会显示成第 1 世、也认不出上一世）
         const prevId = sessionId;
+        farewelled = false;
         sessionId = createBotSession({
           cwd,
           model: cfg.model,
@@ -1613,7 +1619,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
         });
         return;
       } else if (cmd === "farewell") {
-        if (hasFarewelled(sessionId)) {
+        if (hasFarewelled()) {
           push(dim("  这一世已经告别过了——再来一次不会写出新的告别；用 /new 开新的一世"), "");
           refresh();
         } else openFarewellConfirm();
@@ -1650,7 +1656,7 @@ export async function runBotFlow(cwd: string, resumeId?: string): Promise<void> 
     if (busy) return; // 正文消息仍要求主会话空闲（命令层不受限）
     // 这一世已经告别过（eulogy.md 在）→ 不再接受消息：死掉的一世不该还能说话。
     // 把“想说话”这个意图直接转成“要开新的一世吗”，且**不清输入框**（开新世后可直接发送）。
-    if (hasFarewelled(sessionId)) {
+    if (hasFarewelled()) {
       push(dim("  这一世已经告别过了（写下的告别在 /resume 与 eulogy.md 里）。要接着做事就开新的一世："), "");
       refresh();
       openRebirthConfirm(sessionId);
